@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.1.0
+ * Version: 1.1.1
  * Author: SHIGE3.WORK
  * Author URI: https://www.shige3.work
  * Text Domain: wp-gdrive-backup
@@ -441,31 +441,8 @@ class WP_GDrive_Backup {
                     $('.wpgb-retry-upload-btn').prop('disabled', true);
                     $('#wpgb-progress-wrapper').show();
                     $('#wpgb-progress-bar').css('width', '5%').css('background', '#2271b1');
-                                else if (stepName === 'cleanup') {
-                                    $('#wpgb-progress-bar').css('width', '100%').css('background', '#46b450');
-                                    $('#wpgb-progress-text').text('バックアップが完全に終了しました！');
-                                    btn.prop('disabled', false);
-                                }
-                            },
-                            error: function(xhr) {
-                                if (xhr.status === 504 || xhr.status === 502) {
-                                    showError('サーバーのタイムアウト制限に到達しました。処理が完了しなかった可能性があります。');
-                                } else {
-                                    showError('通信エラーが発生しました。');
-                                }
-                            }
-                        });
-                    }
-
-                    function showError(msg) {
-                        $('#wpgb-progress-bar').css('background', '#d63638');
-                        $('#wpgb-progress-text').text('エラー: ' + msg);
-                        btn.prop('disabled', false);
-                        
-                        $.post(ajaxurl, { action: 'wpgb_chunk_step', step: 'abort', _ajax_nonce: nonce });
-                    }
-
-                    doStep('init');
+                    $('#wpgb-progress-text').text('準備中...').css('color', '#000');
+                    doStep('init', 0);
                 });
             });
             </script>
