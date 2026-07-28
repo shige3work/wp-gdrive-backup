@@ -5,5 +5,13 @@
     "require": {
         "google/apiclient": "^2.15.0",
         "yahnis-elsts/plugin-update-checker": "^5.4"
+    },
+    "scripts": {
+        "pre-autoload-dump": "Google\\Task\\Composer::cleanup"
+    },
+    "extra": {
+        "google/apiclient-services": [
+            "Drive"
+        ]
     }
 }
