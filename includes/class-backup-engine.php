@@ -75,21 +75,6 @@ class WP_GDrive_Backup_Engine {
 
         $root_path = untrailingslashit( ABSPATH );
         $zip_file = $state['zip_file'];
-
-        if ($offset == 0) {
-            if ( $this->execute_zip_cli($root_path, $zip_file, $this->file_list_path) ) {
-                $total_files = 0;
-                $fp = fopen($this->file_list_path, 'r');
-                if ($fp) {
-                    while(!feof($fp)) { 
-                        if (fgets($fp) !== false) $total_files++; 
-                    }
-                    fclose($fp);
-                }
-                return ['processed' => $total_files];
-            }
-        }
-
         $zip = new ZipArchive();
         if ( $zip->open($zip_file, ZipArchive::CREATE) !== true ) {
             throw new Exception("Zipファイルの作成/展開に失敗しました。");
@@ -126,27 +111,6 @@ class WP_GDrive_Backup_Engine {
         $zip->close();
 
         return ['processed' => $offset + $added];
-    }
-
-    private function execute_zip_cli($root_path, $zip_file, $file_list) {
-        if (!function_exists('exec')) return false;
-        $disabled = explode(',', ini_get('disable_functions'));
-        $disabled = array_map('trim', $disabled);
-        if (in_array('exec', $disabled)) return false;
-        
-        exec('zip -v', $output, $return_code);
-        if ($return_code !== 0) return false;
-        
-        if (file_exists($zip_file)) @unlink($zip_file);
-
-        $cmd = sprintf("cd %s && zip -q %s -@ < %s", 
-            escapeshellarg($root_path), 
-            escapeshellarg($zip_file),
-            escapeshellarg($file_list)
-        );
-        exec($cmd, $output, $return_code);
-        
-        return file_exists($zip_file) && filesize($zip_file) > 0;
     }
 
     public function step_finalize_zip() {
