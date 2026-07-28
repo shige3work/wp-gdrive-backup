@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: Your Name
  * Text Domain: wp-gdrive-backup
  */
@@ -62,8 +62,7 @@ class WP_GDrive_Backup {
     private function __construct() {
         add_action( 'admin_menu', [ $this, 'add_admin_menu' ] );
         add_action( 'admin_init', [ $this, 'register_settings' ] );
-        add_action( 'wp_ajax_wpgb_start_backup', [ $this, 'ajax_start_backup' ] );
-        add_action( 'wp_ajax_wpgb_get_progress', [ $this, 'ajax_get_progress' ] );
+        add_action( 'wp_ajax_wpgb_chunk_step', [ $this, 'ajax_chunk_step' ] );
         
         // Initialize cron manager
         if ( class_exists( 'WP_GDrive_Cron_Manager' ) ) {
@@ -167,78 +166,91 @@ class WP_GDrive_Backup {
             </div>
             <script>
             jQuery(document).ready(function($) {
-                let pollingInterval;
                 $('#wpgb-start-backup-btn').on('click', function() {
                     if ( ! confirm('バックアップを開始します。処理には数分かかる場合があります。よろしいですか？') ) return;
                     
-                    $(this).prop('disabled', true);
+                    let btn = $(this);
+                    btn.prop('disabled', true);
                     $('#wpgb-progress-wrapper').show();
-                    $('#wpgb-progress-bar').css('width', '2%').css('background', '#2271b1');
-                    $('#wpgb-progress-text').text('バックアップ処理をサーバーに要求しています...');
+                    $('#wpgb-progress-bar').css('width', '5%').css('background', '#2271b1');
+                    $('#wpgb-progress-text').text('準備中 (データベース保存・ファイル一覧作成)...');
                     
-                    // Start backup
-                    $.ajax({
-                        url: ajaxurl,
-                        type: 'POST',
-                        data: {
-                            action: 'wpgb_start_backup',
-                            _ajax_nonce: '<?php echo wp_create_nonce("wpgb_ajax_backup"); ?>'
-                        },
-                        success: function(res) {
-                            if (res.success) {
-                                $('#wpgb-progress-bar').css('width', '100%').css('background', '#46b450');
-                                $('#wpgb-progress-text').text('バックアップが完全に終了しました！');
-                                clearInterval(pollingInterval);
-                                $('#wpgb-start-backup-btn').prop('disabled', false);
-                            } else {
-                                $('#wpgb-progress-bar').css('background', '#d63638');
-                                $('#wpgb-progress-text').text('エラー: ' + (res.data || '不明なエラー'));
-                                clearInterval(pollingInterval);
-                                $('#wpgb-start-backup-btn').prop('disabled', false);
-                            }
-                        },
-                        error: function(xhr, status, error) {
-                            // タイムアウトしても裏で動いている可能性があるのでポーリングは止めない
-                            if (xhr.status === 504 || xhr.status === 502) {
-                                console.log('Nginx timeout received, but backup might still be running.');
-                            } else {
-                                $('#wpgb-progress-bar').css('background', '#d63638');
-                                $('#wpgb-progress-text').text('通信エラーが発生しました。裏側で処理が継続している可能性があります。');
-                                clearInterval(pollingInterval);
-                                $('#wpgb-start-backup-btn').prop('disabled', false);
-                            }
-                        }
-                    });
-                    
-                    // Poll progress
-                    pollingInterval = setInterval(function() {
+                    let totalFiles = 0;
+                    let currentOffset = 0;
+                    let nonce = '<?php echo wp_create_nonce("wpgb_ajax_backup"); ?>';
+
+                    function doStep(stepName, offset = 0) {
                         $.ajax({
                             url: ajaxurl,
                             type: 'POST',
-                            data: { action: 'wpgb_get_progress' },
+                            data: {
+                                action: 'wpgb_chunk_step',
+                                _ajax_nonce: nonce,
+                                step: stepName,
+                                offset: offset
+                            },
                             success: function(res) {
-                                if (res.success && res.data) {
-                                    let percent = parseInt(res.data.percent) || 0;
-                                    let msg = res.data.message || '';
-                                    if (percent > 0) {
-                                        $('#wpgb-progress-bar').css('width', percent + '%');
+                                if (!res.success) {
+                                    showError(res.data || '不明なエラー');
+                                    return;
+                                }
+
+                                if (stepName === 'init') {
+                                    totalFiles = res.data.total_files;
+                                    $('#wpgb-progress-text').text('Zip圧縮を開始します... (0 / ' + totalFiles + ')');
+                                    $('#wpgb-progress-bar').css('width', '10%');
+                                    doStep('zip', 0);
+                                } 
+                                else if (stepName === 'zip') {
+                                    currentOffset = res.data.processed;
+                                    let percent = 10 + Math.floor((currentOffset / totalFiles) * 70);
+                                    if (percent > 80) percent = 80;
+                                    $('#wpgb-progress-bar').css('width', percent + '%');
+                                    $('#wpgb-progress-text').text('ファイルを圧縮中... (' + currentOffset + ' / ' + totalFiles + ')');
+                                    
+                                    if (currentOffset < totalFiles) {
+                                        doStep('zip', currentOffset);
+                                    } else {
+                                        $('#wpgb-progress-bar').css('width', '85%');
+                                        $('#wpgb-progress-text').text('Zipファイルの最終処理中...');
+                                        doStep('finalize');
                                     }
-                                    if (msg) {
-                                        $('#wpgb-progress-text').text(msg + ' (' + percent + '%)');
-                                    }
-                                    if (percent >= 100 || res.data.status === 'error') {
-                                        clearInterval(pollingInterval);
-                                        $('#wpgb-start-backup-btn').prop('disabled', false);
-                                        if (res.data.status === 'error') {
-                                            $('#wpgb-progress-bar').css('background', '#d63638');
-                                        } else {
-                                            $('#wpgb-progress-bar').css('background', '#46b450');
-                                        }
-                                    }
+                                }
+                                else if (stepName === 'finalize') {
+                                    $('#wpgb-progress-bar').css('width', '90%');
+                                    $('#wpgb-progress-text').text('Google Driveへアップロード中... (数分かかる場合があります)');
+                                    doStep('upload');
+                                }
+                                else if (stepName === 'upload') {
+                                    $('#wpgb-progress-bar').css('width', '95%');
+                                    $('#wpgb-progress-text').text('完了処理中...');
+                                    doStep('cleanup');
+                                }
+                                else if (stepName === 'cleanup') {
+                                    $('#wpgb-progress-bar').css('width', '100%').css('background', '#46b450');
+                                    $('#wpgb-progress-text').text('バックアップが完全に終了しました！');
+                                    btn.prop('disabled', false);
+                                }
+                            },
+                            error: function(xhr) {
+                                if (xhr.status === 504 || xhr.status === 502) {
+                                    showError('サーバーのタイムアウト制限に到達しました。処理が完了しなかった可能性があります。');
+                                } else {
+                                    showError('通信エラーが発生しました。');
                                 }
                             }
                         });
-                    }, 2500);
+                    }
+
+                    function showError(msg) {
+                        $('#wpgb-progress-bar').css('background', '#d63638');
+                        $('#wpgb-progress-text').text('エラー: ' + msg);
+                        btn.prop('disabled', false);
+                        
+                        $.post(ajaxurl, { action: 'wpgb_chunk_step', step: 'abort', _ajax_nonce: nonce });
+                    }
+
+                    doStep('init');
                 });
             });
             </script>
@@ -246,49 +258,52 @@ class WP_GDrive_Backup {
         <?php
     }
 
-    public function ajax_start_backup() {
+    public function ajax_chunk_step() {
         check_ajax_referer( 'wpgb_ajax_backup' );
         if ( ! current_user_can( 'manage_options' ) ) {
             wp_send_json_error( '権限がありません。' );
         }
 
-        // タイムアウト対策とユーザーの中断を無視
         ignore_user_abort(true);
         set_time_limit(0);
-        
-        delete_transient('wpgb_backup_progress');
+
+        $step = isset($_POST['step']) ? sanitize_text_field($_POST['step']) : '';
+        $offset = isset($_POST['offset']) ? intval($_POST['offset']) : 0;
+        $limit = 2000;
 
         try {
             $engine = new WP_GDrive_Backup_Engine();
-            $result = $engine->run_backup();
-
-            if ( $result ) {
-                WP_GDrive_Mailer::send_success_report( $engine->get_last_backup_info() );
-                wp_send_json_success( '完了' );
-            } else {
-                wp_send_json_error( '失敗しました。' );
+            $result = [];
+            
+            switch ($step) {
+                case 'init':
+                    $result = $engine->step_init();
+                    break;
+                case 'zip':
+                    $result = $engine->step_zip_chunk($offset, $limit);
+                    break;
+                case 'finalize':
+                    $result = $engine->step_finalize_zip();
+                    break;
+                case 'upload':
+                    $result = $engine->step_upload();
+                    break;
+                case 'cleanup':
+                    $result = $engine->step_cleanup();
+                    break;
+                case 'abort':
+                    $result = $engine->step_abort();
+                    break;
+                default:
+                    wp_send_json_error('不明なステップ');
             }
-        } catch ( Exception $e ) {
-            WP_GDrive_Mailer::send_error_report( $e->getMessage() );
-            // Transientにもエラーを記録しておく
-            set_transient('wpgb_backup_progress', [
-                'percent' => 100,
-                'message' => 'エラーが発生しました: ' . $e->getMessage(),
-                'status'  => 'error'
-            ], 60);
-            wp_send_json_error( $e->getMessage() );
-        }
-    }
 
-    public function ajax_get_progress() {
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_send_json_error( '権限がありません。' );
-        }
-        $progress = get_transient('wpgb_backup_progress');
-        if ( $progress ) {
-            wp_send_json_success( $progress );
-        } else {
-            wp_send_json_error( 'No progress data' );
+            wp_send_json_success($result);
+        } catch ( Exception $e ) {
+            if ($step === 'upload' || $step === 'finalize') {
+                WP_GDrive_Mailer::send_error_report( $e->getMessage() );
+            }
+            wp_send_json_error( $e->getMessage() );
         }
     }
 }
