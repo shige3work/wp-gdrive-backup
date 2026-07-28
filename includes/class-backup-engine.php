@@ -74,33 +74,41 @@ class WP_GDrive_Backup_Engine {
         if ( ! $state ) throw new Exception("バックアップ状態が見つかりません。");
 
         if ( ! class_exists( 'ZipArchive' ) ) {
-            throw new Exception("ZipArchive 拡張機能がインストールされていません。");
+    public function step_zip_chunk($offset, $limit = 2000000) {
+        $state = json_decode(file_get_contents($this->state_path), true);
+        if ( ! $state ) throw new Exception("バックアップ状態が見つかりません。");
+
+        $root_path = untrailingslashit( ABSPATH );
+        $zip_file = $state['zip_file'];
+
+        if ($offset == 0) {
+            if ( $this->execute_zip_cli($root_path, $zip_file, $this->file_list_path) ) {
+                $total_files = 0;
+                $fp = fopen($this->file_list_path, 'r');
+                if ($fp) {
+                    while(!feof($fp)) { 
+                        if (fgets($fp) !== false) $total_files++; 
+                    }
+                    fclose($fp);
+                }
+                return ['processed' => $total_files];
+            }
         }
 
         $zip = new ZipArchive();
-        $flags = ($offset === 0) ? (ZipArchive::CREATE | ZipArchive::OVERWRITE) : 0;
-        
-        if ($offset === 0) {
-            if ($zip->open( $state['zip_file'], ZipArchive::CREATE ) !== true) {
-                throw new Exception("Zipファイルの作成に失敗しました。");
-            }
-        } else {
-            if ($zip->open( $state['zip_file'] ) !== true) {
-                throw new Exception("Zipファイルの追記オープンに失敗しました。");
-            }
+        if ( $zip->open($zip_file, ZipArchive::CREATE) !== true ) {
+            throw new Exception("Zipファイルの作成/展開に失敗しました。");
         }
 
-        $root_path = ABSPATH;
         $fp = fopen($this->file_list_path, 'r');
-        
         $current = 0;
         while ( $current < $offset && ! feof($fp) ) {
             fgets($fp);
             $current++;
         }
 
-        $start_time = microtime(true);
         $added = 0;
+        $chunk_bytes = 0;
         while ( ! feof($fp) ) {
             $line = fgets($fp);
             if ($line === false) break;
@@ -109,20 +117,41 @@ class WP_GDrive_Backup_Engine {
             if ( ! empty($file_path) && file_exists($file_path) ) {
                 $relative_path = substr( $file_path, strlen( $root_path ) );
                 $zip->addFile( $file_path, ltrim($relative_path, '/\\') );
+                $chunk_bytes += filesize($file_path);
             }
             $added++;
             
-            // Limit to 10 seconds per chunk to strictly avoid nginx timeouts
-            if ($added % 50 === 0 && (microtime(true) - $start_time) > 10) {
+            // ZipArchive::addFile is deferred until close(), so microtime() check is useless here.
+            // We must limit by file count or bytes to ensure close() finishes quickly.
+            if ($added >= 500 || $chunk_bytes >= 30 * 1024 * 1024) {
                 break;
             }
         }
         fclose($fp);
         $zip->close();
 
-        return [
-            'processed' => $offset + $added
-        ];
+        return ['processed' => $offset + $added];
+    }
+
+    private function execute_zip_cli($root_path, $zip_file, $file_list) {
+        if (!function_exists('exec')) return false;
+        $disabled = explode(',', ini_get('disable_functions'));
+        $disabled = array_map('trim', $disabled);
+        if (in_array('exec', $disabled)) return false;
+        
+        exec('zip -v', $output, $return_code);
+        if ($return_code !== 0) return false;
+        
+        if (file_exists($zip_file)) @unlink($zip_file);
+
+        $cmd = sprintf("cd %s && zip -q %s -@ < %s", 
+            escapeshellarg($root_path), 
+            escapeshellarg($zip_file),
+            escapeshellarg($file_list)
+        );
+        exec($cmd, $output, $return_code);
+        
+        return file_exists($zip_file) && filesize($zip_file) > 0;
     }
 
     public function step_finalize_zip() {
