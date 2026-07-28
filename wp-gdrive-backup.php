@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.0.11
+ * Version: 1.1.0
  * Author: SHIGE3.WORK
  * Author URI: https://www.shige3.work
  * Text Domain: wp-gdrive-backup
@@ -85,7 +85,8 @@ class WP_GDrive_Backup {
     }
 
     public function register_settings() {
-        register_setting( 'wp_gdrive_backup_settings', 'wpgb_gdrive_json_key' );
+        register_setting( 'wp_gdrive_backup_settings', 'wpgb_gdrive_client_id' );
+        register_setting( 'wp_gdrive_backup_settings', 'wpgb_gdrive_client_secret' );
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_gdrive_folder_id' );
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_backup_interval' );
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_retention_period' );
@@ -96,6 +97,39 @@ class WP_GDrive_Backup {
         if ( ! current_user_can( 'manage_options' ) ) {
             return;
         }
+
+        $client_id = get_option('wpgb_gdrive_client_id');
+        $client_secret = get_option('wpgb_gdrive_client_secret');
+        $redirect_uri = admin_url('admin.php?page=wp-gdrive-backup');
+        
+        if ( class_exists('Google_Client') ) {
+            $client = new Google_Client();
+            $client->setClientId($client_id);
+            $client->setClientSecret($client_secret);
+            $client->setRedirectUri($redirect_uri);
+            $client->addScope(Google_Service_Drive::DRIVE_FILE);
+            $client->setAccessType('offline');
+            $client->setPrompt('consent');
+
+            if ( isset($_GET['code']) && !isset($_GET['settings-updated']) ) {
+                $token = $client->fetchAccessTokenWithAuthCode(sanitize_text_field($_GET['code']));
+                if ( !isset($token['error']) && isset($token['refresh_token']) ) {
+                    update_option('wpgb_gdrive_refresh_token', $token['refresh_token']);
+                    echo '<div class="updated"><p>Google Drive との連携が完了しました！（リフレッシュトークンを取得しました）</p></div>';
+                } elseif ( !isset($token['error']) ) {
+                    echo '<div class="error"><p>認証エラー: リフレッシュトークンが取得できませんでした。連携を解除してやり直してください。</p></div>';
+                } else {
+                    echo '<div class="error"><p>認証エラー: ' . esc_html($token['error_description'] ?? $token['error']) . '</p></div>';
+                }
+            }
+
+            if ( isset($_POST['wpgb_revoke_auth']) && check_admin_referer('wpgb_revoke_auth') ) {
+                delete_option('wpgb_gdrive_refresh_token');
+                echo '<div class="updated"><p>Google Drive との連携を解除しました。</p></div>';
+            }
+        }
+        
+        $refresh_token = get_option('wpgb_gdrive_refresh_token');
         ?>
         <div class="wrap">
             <h1>WP Google Drive Backup 設定</h1>
@@ -106,12 +140,43 @@ class WP_GDrive_Backup {
                 ?>
                 <table class="form-table">
                     <tr>
-                        <th scope="row"><label for="wpgb_gdrive_json_key">サービスアカウント JSONキー</label></th>
+                        <th scope="row"><label for="wpgb_gdrive_client_id">OAuth クライアント ID</label></th>
                         <td>
-                            <textarea name="wpgb_gdrive_json_key" id="wpgb_gdrive_json_key" rows="10" cols="50" class="large-text code"><?php echo esc_textarea( get_option( 'wpgb_gdrive_json_key' ) ); ?></textarea>
-                            <p class="description">Google Cloud Platformで発行したサービスアカウントのJSONキーの中身をそのまま貼り付けてください。</p>
+                            <input type="text" name="wpgb_gdrive_client_id" id="wpgb_gdrive_client_id" value="<?php echo esc_attr( $client_id ); ?>" class="regular-text">
                         </td>
                     </tr>
+                    <tr>
+                        <th scope="row"><label for="wpgb_gdrive_client_secret">OAuth クライアント シークレット</label></th>
+                        <td>
+                            <input type="password" name="wpgb_gdrive_client_secret" id="wpgb_gdrive_client_secret" value="<?php echo esc_attr( $client_secret ); ?>" class="regular-text">
+                            <p class="description">Google Cloud Consoleで作成した「ウェブ アプリケーション」のクライアントIDとシークレットを入力してください。</p>
+                            <p class="description" style="color:#d63638; font-weight:bold;">※ 承認済みのリダイレクト URI には以下を必ず登録してください：<br>
+                            <code><?php echo esc_html($redirect_uri); ?></code></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Google Drive 認証</th>
+                        <td>
+                            <?php if ( $refresh_token ): ?>
+                                <p style="color:#46b450; font-weight:bold;"><span class="dashicons dashicons-yes-alt"></span> 認証済み（連携完了）</p>
+                                <p class="description">このサイトは現在Google Driveに自動アップロード可能です。</p>
+                            <?php elseif ( $client_id && $client_secret ): ?>
+                                <p style="color:#d63638; font-weight:bold;">未認証</p>
+                                <a href="<?php echo esc_url($client->createAuthUrl()); ?>" class="button button-primary">Google Driveで認証する</a>
+                                <p class="description">上記のボタンをクリックしてGoogleにログインし、このアプリへのアクセスを許可してください。</p>
+                            <?php else: ?>
+                                <p class="description">クライアントIDとシークレットを入力して保存すると、認証ボタンが表示されます。</p>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php if ( $refresh_token ): ?>
+                    <tr>
+                        <th scope="row">連携の解除</th>
+                        <td>
+                            <button type="button" class="button" onclick="document.getElementById('revoke-form').submit();">連携を解除する</button>
+                        </td>
+                    </tr>
+                    <?php endif; ?>
                     <tr>
                         <th scope="row"><label for="wpgb_gdrive_folder_id">Google Drive フォルダID</label></th>
                         <td>
@@ -154,6 +219,13 @@ class WP_GDrive_Backup {
                 <?php submit_button(); ?>
             </form>
 
+            <?php if ( $refresh_token ): ?>
+            <form id="revoke-form" method="post" action="">
+                <?php wp_nonce_field('wpgb_revoke_auth'); ?>
+                <input type="hidden" name="wpgb_revoke_auth" value="1">
+            </form>
+            <?php endif; ?>
+            
             <hr>
             <h2>バックアップの保存先 (Google Drive)</h2>
             <?php $folder_id = get_option('wpgb_gdrive_folder_id'); ?>
