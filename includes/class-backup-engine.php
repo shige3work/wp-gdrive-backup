@@ -19,6 +19,7 @@ class WP_GDrive_Backup_Engine {
     }
 
     public function run_backup() {
+        $this->update_progress(5, 'バックアップの準備中...');
         $site_name = preg_replace('/[^a-zA-Z0-9_-]/', '', get_bloginfo('name'));
         if ( empty($site_name) ) $site_name = 'wordpress';
         $timestamp = date( 'Ymd_His' );
@@ -31,16 +32,20 @@ class WP_GDrive_Backup_Engine {
 
         try {
             // 1. Dump Database
+            $this->update_progress(10, 'データベースをバックアップ中...');
             $db_dumper = new WP_GDrive_DB_Dumper();
             $db_dumper->dump( $sql_file );
 
             // 2. Generate installer.php
+            $this->update_progress(15, 'インストーラーを生成中...');
             $this->generate_installer( $installer_file, $backup_basename . '.zip' );
 
             // 3. Zip files
+            $this->update_progress(20, 'ファイルの圧縮準備中...');
             $this->create_zip( $zip_file, $sql_file );
 
             // 4. Upload to Google Drive (folder format)
+            $this->update_progress(70, 'Google Driveへアップロード中... (これには数分かかる場合があります)');
             $uploader = new WP_GDrive_Uploader();
             $folder_id = $uploader->create_folder( $backup_basename );
             
@@ -52,11 +57,13 @@ class WP_GDrive_Backup_Engine {
             }
 
             // 5. Cleanup local files
+            $this->update_progress(90, '一時ファイルを削除中...');
             @unlink( $sql_file );
             @unlink( $zip_file );
             @unlink( $installer_file );
 
             // 6. Manage retention on Google Drive
+            $this->update_progress(95, '古いバックアップを整理中...');
             $retention = new WP_GDrive_Retention_Manager();
             $retention->cleanup_old_backups( $uploader );
 
@@ -65,6 +72,7 @@ class WP_GDrive_Backup_Engine {
                 'time' => current_time('mysql')
             ];
 
+            $this->update_progress(100, '完了しました！');
             return true;
 
         } catch ( Exception $e ) {
@@ -92,6 +100,15 @@ class WP_GDrive_Backup_Engine {
             RecursiveIteratorIterator::LEAVES_ONLY
         );
 
+        $total_files = iterator_count($files);
+
+        // Re-instantiate iterator after count
+        $files = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator( $root_path, RecursiveDirectoryIterator::SKIP_DOTS ),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        $processed = 0;
         foreach ( $files as $name => $file ) {
             if ( ! $file->isDir() ) {
                 $file_path = $file->getRealPath();
@@ -102,6 +119,11 @@ class WP_GDrive_Backup_Engine {
                 
                 $relative_path = substr( $file_path, strlen( $root_path ) );
                 $zip->addFile( $file_path, $relative_path );
+                $processed++;
+                if ( $processed % 1000 === 0 ) {
+                    $percent = 20 + floor( ( $processed / $total_files ) * 50 );
+                    $this->update_progress( $percent, "ファイルを圧縮中... ({$processed} / {$total_files})" );
+                }
             }
         }
 
@@ -126,5 +148,13 @@ class WP_GDrive_Backup_Engine {
 
     public function get_last_backup_info() {
         return $this->last_backup_info;
+    }
+
+    private function update_progress( $percent, $message ) {
+        set_transient('wpgb_backup_progress', [
+            'percent' => $percent,
+            'message' => $message,
+            'status'  => 'running'
+        ], 60 * 10); // 10 minutes expiration
     }
 }

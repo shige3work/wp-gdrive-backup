@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: Your Name
  * Text Domain: wp-gdrive-backup
  */
@@ -62,7 +62,8 @@ class WP_GDrive_Backup {
     private function __construct() {
         add_action( 'admin_menu', [ $this, 'add_admin_menu' ] );
         add_action( 'admin_init', [ $this, 'register_settings' ] );
-        add_action( 'admin_post_wp_gdrive_manual_backup', [ $this, 'handle_manual_backup' ] );
+        add_action( 'wp_ajax_wpgb_start_backup', [ $this, 'ajax_start_backup' ] );
+        add_action( 'wp_ajax_wpgb_get_progress', [ $this, 'ajax_get_progress' ] );
         
         // Initialize cron manager
         if ( class_exists( 'WP_GDrive_Cron_Manager' ) ) {
@@ -155,23 +156,107 @@ class WP_GDrive_Backup {
             <hr>
             <h2>手動バックアップの実行</h2>
             <p>現在の設定で今すぐバックアップを作成し、Google Driveへアップロードします。</p>
-            <form action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" method="post">
-                <input type="hidden" name="action" value="wp_gdrive_manual_backup">
-                <?php wp_nonce_field( 'wp_gdrive_manual_backup_nonce', '_wpnonce' ); ?>
-                <button type="submit" class="button button-secondary">今すぐバックアップを実行</button>
-            </form>
+            <div id="wpgb-manual-backup-container">
+                <button type="button" id="wpgb-start-backup-btn" class="button button-primary">今すぐバックアップを実行</button>
+                <div id="wpgb-progress-wrapper" style="display:none; margin-top:20px;">
+                    <div style="width:100%; max-width:600px; background:#ddd; border-radius:4px; overflow:hidden;">
+                        <div id="wpgb-progress-bar" style="width:0%; height:20px; background:#2271b1; transition: width 0.5s;"></div>
+                    </div>
+                    <p id="wpgb-progress-text" style="font-weight:bold; margin-top:8px;">準備中...</p>
+                </div>
+            </div>
+            <script>
+            jQuery(document).ready(function($) {
+                let pollingInterval;
+                $('#wpgb-start-backup-btn').on('click', function() {
+                    if ( ! confirm('バックアップを開始します。処理には数分かかる場合があります。よろしいですか？') ) return;
+                    
+                    $(this).prop('disabled', true);
+                    $('#wpgb-progress-wrapper').show();
+                    $('#wpgb-progress-bar').css('width', '2%').css('background', '#2271b1');
+                    $('#wpgb-progress-text').text('バックアップ処理をサーバーに要求しています...');
+                    
+                    // Start backup
+                    $.ajax({
+                        url: ajaxurl,
+                        type: 'POST',
+                        data: {
+                            action: 'wpgb_start_backup',
+                            _ajax_nonce: '<?php echo wp_create_nonce("wpgb_ajax_backup"); ?>'
+                        },
+                        success: function(res) {
+                            if (res.success) {
+                                $('#wpgb-progress-bar').css('width', '100%').css('background', '#46b450');
+                                $('#wpgb-progress-text').text('バックアップが完全に終了しました！');
+                                clearInterval(pollingInterval);
+                                $('#wpgb-start-backup-btn').prop('disabled', false);
+                            } else {
+                                $('#wpgb-progress-bar').css('background', '#d63638');
+                                $('#wpgb-progress-text').text('エラー: ' + (res.data || '不明なエラー'));
+                                clearInterval(pollingInterval);
+                                $('#wpgb-start-backup-btn').prop('disabled', false);
+                            }
+                        },
+                        error: function(xhr, status, error) {
+                            // タイムアウトしても裏で動いている可能性があるのでポーリングは止めない
+                            if (xhr.status === 504 || xhr.status === 502) {
+                                console.log('Nginx timeout received, but backup might still be running.');
+                            } else {
+                                $('#wpgb-progress-bar').css('background', '#d63638');
+                                $('#wpgb-progress-text').text('通信エラーが発生しました。裏側で処理が継続している可能性があります。');
+                                clearInterval(pollingInterval);
+                                $('#wpgb-start-backup-btn').prop('disabled', false);
+                            }
+                        }
+                    });
+                    
+                    // Poll progress
+                    pollingInterval = setInterval(function() {
+                        $.ajax({
+                            url: ajaxurl,
+                            type: 'POST',
+                            data: { action: 'wpgb_get_progress' },
+                            success: function(res) {
+                                if (res.success && res.data) {
+                                    let percent = parseInt(res.data.percent) || 0;
+                                    let msg = res.data.message || '';
+                                    if (percent > 0) {
+                                        $('#wpgb-progress-bar').css('width', percent + '%');
+                                    }
+                                    if (msg) {
+                                        $('#wpgb-progress-text').text(msg + ' (' + percent + '%)');
+                                    }
+                                    if (percent >= 100 || res.data.status === 'error') {
+                                        clearInterval(pollingInterval);
+                                        $('#wpgb-start-backup-btn').prop('disabled', false);
+                                        if (res.data.status === 'error') {
+                                            $('#wpgb-progress-bar').css('background', '#d63638');
+                                        } else {
+                                            $('#wpgb-progress-bar').css('background', '#46b450');
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }, 2500);
+                });
+            });
+            </script>
         </div>
         <?php
     }
 
-    public function handle_manual_backup() {
+    public function ajax_start_backup() {
+        check_ajax_referer( 'wpgb_ajax_backup' );
         if ( ! current_user_can( 'manage_options' ) ) {
-            wp_die( '権限がありません。' );
+            wp_send_json_error( '権限がありません。' );
         }
-        check_admin_referer( 'wp_gdrive_manual_backup_nonce' );
 
-        // タイムアウトを伸ばす
+        // タイムアウト対策とユーザーの中断を無視
+        ignore_user_abort(true);
         set_time_limit(0);
+        
+        delete_transient('wpgb_backup_progress');
 
         try {
             $engine = new WP_GDrive_Backup_Engine();
@@ -179,14 +264,31 @@ class WP_GDrive_Backup {
 
             if ( $result ) {
                 WP_GDrive_Mailer::send_success_report( $engine->get_last_backup_info() );
-                wp_redirect( add_query_arg( [ 'page' => 'wp-gdrive-backup', 'msg' => 'success' ], admin_url( 'admin.php' ) ) );
-                exit;
+                wp_send_json_success( '完了' );
             } else {
-                throw new Exception("バックアップ処理が失敗しました。");
+                wp_send_json_error( '失敗しました。' );
             }
         } catch ( Exception $e ) {
             WP_GDrive_Mailer::send_error_report( $e->getMessage() );
-            wp_die( 'バックアップ中にエラーが発生しました: ' . esc_html( $e->getMessage() ) );
+            // Transientにもエラーを記録しておく
+            set_transient('wpgb_backup_progress', [
+                'percent' => 100,
+                'message' => 'エラーが発生しました: ' . $e->getMessage(),
+                'status'  => 'error'
+            ], 60);
+            wp_send_json_error( $e->getMessage() );
+        }
+    }
+
+    public function ajax_get_progress() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( '権限がありません。' );
+        }
+        $progress = get_transient('wpgb_backup_progress');
+        if ( $progress ) {
+            wp_send_json_success( $progress );
+        } else {
+            wp_send_json_error( 'No progress data' );
         }
     }
 }
