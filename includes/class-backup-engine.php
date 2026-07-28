@@ -69,11 +69,6 @@ class WP_GDrive_Backup_Engine {
         ];
     }
 
-    public function step_zip_chunk( $offset, $limit ) {
-        $state = json_decode(file_get_contents($this->state_path), true);
-        if ( ! $state ) throw new Exception("バックアップ状態が見つかりません。");
-
-        if ( ! class_exists( 'ZipArchive' ) ) {
     public function step_zip_chunk($offset, $limit = 2000000) {
         $state = json_decode(file_get_contents($this->state_path), true);
         if ( ! $state ) throw new Exception("バックアップ状態が見つかりません。");
