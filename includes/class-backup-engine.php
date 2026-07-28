@@ -99,8 +99,9 @@ class WP_GDrive_Backup_Engine {
             $current++;
         }
 
+        $start_time = microtime(true);
         $added = 0;
-        while ( ! feof($fp) && $added < $limit ) {
+        while ( ! feof($fp) ) {
             $line = fgets($fp);
             if ($line === false) break;
             
@@ -110,6 +111,11 @@ class WP_GDrive_Backup_Engine {
                 $zip->addFile( $file_path, ltrim($relative_path, '/\\') );
             }
             $added++;
+            
+            // Limit to 10 seconds per chunk to strictly avoid nginx timeouts
+            if ($added % 50 === 0 && (microtime(true) - $start_time) > 10) {
+                break;
+            }
         }
         fclose($fp);
         $zip->close();
@@ -136,16 +142,89 @@ class WP_GDrive_Backup_Engine {
         if ( ! $state ) throw new Exception("バックアップ状態が見つかりません。");
 
         $uploader = new WP_GDrive_Uploader();
-        $folder_id = $uploader->create_folder( $state['basename'] );
+        $client = $uploader->get_client();
+        $local_file_path = $state['zip_file'];
         
-        if ( $folder_id ) {
-            $uploader->upload_file( $state['zip_file'], "{$state['basename']}.zip", $folder_id );
-            $uploader->upload_file( $state['installer_file'], 'installer.php', $folder_id );
-        } else {
-            throw new Exception("Google Driveへのフォルダ作成に失敗しました。");
+        if ( ! file_exists($local_file_path) ) {
+            throw new Exception("アップロードするZipファイルが見つかりません。");
+        }
+        
+        $file_size = filesize($local_file_path);
+        $chunkSizeBytes = 2 * 1024 * 1024; // 2MB chunk
+        $client->setDefer(true);
+
+        // If resumeUri is not set, initialize upload session
+        if ( empty($state['resumeUri']) ) {
+            $folder_id = $uploader->create_folder( $state['basename'] );
+            if ( ! $folder_id ) throw new Exception("Google Driveへのフォルダ作成に失敗しました。");
+            $state['folder_id'] = $folder_id;
+
+            $fileMetadata = new \Google\Service\Drive\DriveFile([
+                'name' => $state['basename'] . '.zip',
+                'parents' => [ $folder_id ]
+            ]);
+            $request = $uploader->get_service()->files->create($fileMetadata);
+            $media = new \Google\Http\MediaFileUpload(
+                $client, $request, 'application/zip', null, true, $chunkSizeBytes
+            );
+            $media->setFileSize($file_size);
+            
+            $resumeUri = $media->getResumeUri();
+            $state['resumeUri'] = $resumeUri;
+            $state['uploadOffset'] = 0;
+            file_put_contents($this->state_path, wp_json_encode($state));
+            
+            return [
+                'uploaded' => 0,
+                'total' => $file_size,
+                'done' => false
+            ];
         }
 
-        return ['message' => 'アップロードが完了しました。'];
+        // Resume upload
+        $request = $uploader->get_service()->files->create(new \Google\Service\Drive\DriveFile());
+        $media = new \Google\Http\MediaFileUpload(
+            $client, $request, 'application/zip', null, true, $chunkSizeBytes
+        );
+        $media->setFileSize($file_size);
+        $media->resume($state['resumeUri']);
+
+        $status = false;
+        $handle = fopen($local_file_path, "rb");
+        fseek($handle, $state['uploadOffset']);
+        
+        $start_time = microtime(true);
+        while ( ! $status && ! feof($handle) ) {
+            $chunk = fread($handle, $chunkSizeBytes);
+            $status = $media->nextChunk($chunk);
+            $state['uploadOffset'] = ftell($handle);
+            
+            // Break if we exceed 10 seconds
+            if ( (microtime(true) - $start_time) > 10 ) {
+                break;
+            }
+        }
+        fclose($handle);
+
+        if ($status) {
+            // ZIP upload is done. Upload the tiny installer synchronously.
+            $client->setDefer(false);
+            $uploader->upload_file( $state['installer_file'], 'installer.php', $state['folder_id'] );
+            
+            return [
+                'uploaded' => $file_size,
+                'total' => $file_size,
+                'done' => true,
+                'message' => 'アップロードが完了しました。'
+            ];
+        } else {
+            file_put_contents($this->state_path, wp_json_encode($state));
+            return [
+                'uploaded' => $state['uploadOffset'],
+                'total' => $file_size,
+                'done' => false
+            ];
+        }
     }
 
     public function step_cleanup() {
@@ -215,11 +294,18 @@ class WP_GDrive_Backup_Engine {
             $total = $init['total_files'];
             $offset = 0;
             while ($offset < $total) {
-                $res = $this->step_zip_chunk($offset, 2000);
+                // Ignore time limit in cli/cron, we just loop until done
+                $res = $this->step_zip_chunk($offset, 2000000); 
                 $offset = $res['processed'];
             }
             $this->step_finalize_zip();
-            $this->step_upload();
+            
+            $upload_done = false;
+            while (!$upload_done) {
+                $res = $this->step_upload();
+                $upload_done = $res['done'];
+            }
+            
             $this->step_cleanup();
             return true;
         } catch (Exception $e) {

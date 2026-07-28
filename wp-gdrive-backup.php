@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.0.3
+ * Version: 1.0.4
  * Author: Your Name
  * Text Domain: wp-gdrive-backup
  */
@@ -252,14 +252,28 @@ class WP_GDrive_Backup {
                                     }
                                 }
                                 else if (stepName === 'finalize') {
-                                    $('#wpgb-progress-bar').css('width', '90%');
-                                    $('#wpgb-progress-text').text('Google Driveへアップロード中... (数分かかる場合があります)');
+                                    $('#wpgb-progress-bar').css('width', '88%');
+                                    $('#wpgb-progress-text').text('Google Driveへアップロード準備中...');
                                     doStep('upload');
                                 }
                                 else if (stepName === 'upload') {
-                                    $('#wpgb-progress-bar').css('width', '95%');
-                                    $('#wpgb-progress-text').text('完了処理中...');
-                                    doStep('cleanup');
+                                    if (res.data.done) {
+                                        $('#wpgb-progress-bar').css('width', '95%');
+                                        $('#wpgb-progress-text').text('完了処理中...');
+                                        doStep('cleanup');
+                                    } else {
+                                        let uploaded = res.data.uploaded || 0;
+                                        let total = res.data.total || 1;
+                                        let percentMB = (uploaded / 1024 / 1024).toFixed(1);
+                                        let totalMB = (total / 1024 / 1024).toFixed(1);
+                                        
+                                        let uploadPercent = Math.floor((uploaded / total) * 7); // Max 7% added
+                                        $('#wpgb-progress-bar').css('width', (88 + uploadPercent) + '%');
+                                        $('#wpgb-progress-text').text('Google Driveへアップロード中... (' + percentMB + 'MB / ' + totalMB + 'MB)');
+                                        
+                                        // Continue upload
+                                        doStep('upload');
+                                    }
                                 }
                                 else if (stepName === 'cleanup') {
                                     $('#wpgb-progress-bar').css('width', '100%').css('background', '#46b450');

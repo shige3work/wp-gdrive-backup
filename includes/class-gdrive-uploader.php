@@ -89,6 +89,10 @@ class WP_GDrive_Uploader {
         return $this->service;
     }
     
+    public function get_client() {
+        return $this->client;
+    }
+    
     public function get_parent_folder_id() {
         return $this->parent_folder_id;
     }
