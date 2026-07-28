@@ -44,24 +44,51 @@ class WP_GDrive_Backup_Engine {
 
         // 3. Scan files
         $root_path = ABSPATH;
-        $files = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator( $root_path, RecursiveDirectoryIterator::SKIP_DOTS ),
-            RecursiveIteratorIterator::LEAVES_ONLY
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root_path, RecursiveDirectoryIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
         );
+
+        $exclude_dirs = [
+            $this->backup_dir,
+            WP_CONTENT_DIR . '/cache',
+            WP_CONTENT_DIR . '/backups-dup-lite',
+            WP_CONTENT_DIR . '/updraft',
+            WP_CONTENT_DIR . '/upgrade',
+        ];
+
+        $skipped_log = $this->backup_dir . '/wpgb_skipped_files.txt';
+        $skipped_fp = fopen($skipped_log, 'w');
+        fwrite($skipped_fp, "以下のファイルはバックアップから除外されました（容量制限50MB超過、またはキャッシュ/別バックアップ）:\n\n");
 
         $fp = fopen($this->file_list_path, 'w');
         $count = 0;
-        foreach ( $files as $file ) {
-            if ( ! $file->isDir() ) {
-                $file_path = $file->getRealPath();
-                if ( strpos( $file_path, $this->backup_dir ) !== false ) {
+        foreach ($iterator as $file) {
+            if ($file->isFile()) {
+                $file_path = $file->getPathname();
+                
+                // ディレクトリ除外
+                $skip = false;
+                foreach ($exclude_dirs as $ex_dir) {
+                    if ( strpos($file_path, $ex_dir) === 0 ) {
+                        $skip = true;
+                        break;
+                    }
+                }
+                if ($skip) continue;
+
+                // 50MB以上の超巨大ファイルを除外（ZipArchiveのフリーズ・メモリ枯渇を防ぐため）
+                if ( filesize($file_path) > 50 * 1024 * 1024 ) {
+                    fwrite($skipped_fp, "[>50MB] " . $file_path . "\n");
                     continue;
                 }
+
                 fwrite($fp, $file_path . "\n");
                 $count++;
             }
         }
         fclose($fp);
+        fclose($skipped_fp);
 
         return [
             'total_files' => $count,

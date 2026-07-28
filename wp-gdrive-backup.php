@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.0.7
+ * Version: 1.0.8
  * Author: Your Name
  * Text Domain: wp-gdrive-backup
  */
