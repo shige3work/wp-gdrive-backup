@@ -150,6 +150,11 @@ class WP_GDrive_Backup_Engine {
 
     public function step_cleanup() {
         $state = json_decode(file_get_contents($this->state_path), true);
+        $zip_size = 0;
+        if ( $state && file_exists($state['zip_file']) ) {
+            $zip_size = filesize($state['zip_file']);
+        }
+
         if ( $state ) {
             @unlink( $state['sql_file'] );
             @unlink( $state['zip_file'] );
@@ -163,6 +168,16 @@ class WP_GDrive_Backup_Engine {
         $retention->cleanup_old_backups( $uploader );
         
         if ( $state ) {
+            // 履歴の保存
+            $history = get_option('wpgb_backup_history', []);
+            array_unshift($history, [
+                'date' => current_time('mysql'),
+                'name' => $state['basename'],
+                'size' => $zip_size
+            ]);
+            $history = array_slice($history, 0, 50); // 直近50件まで保持
+            update_option('wpgb_backup_history', $history);
+
             WP_GDrive_Mailer::send_success_report( [
                 'name' => $state['basename'],
                 'time' => current_time('mysql')

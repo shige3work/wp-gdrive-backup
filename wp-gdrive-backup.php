@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: Your Name
  * Text Domain: wp-gdrive-backup
  */
@@ -151,6 +151,41 @@ class WP_GDrive_Backup {
                 </table>
                 <?php submit_button(); ?>
             </form>
+
+            <hr>
+            <h2>バックアップの保存先 (Google Drive)</h2>
+            <?php $folder_id = get_option('wpgb_gdrive_folder_id'); ?>
+            <?php if ( $folder_id ): ?>
+                <p>以下のリンクからGoogle Drive上のバックアップフォルダへ直接アクセスできます。</p>
+                <p><a href="https://drive.google.com/drive/folders/<?php echo esc_attr($folder_id); ?>" target="_blank" class="button button-secondary">Google Drive フォルダを開く <span class="dashicons dashicons-external" style="vertical-align: middle; margin-top: 3px;"></span></a></p>
+            <?php else: ?>
+                <p>Google Drive フォルダIDが設定されていません。</p>
+            <?php endif; ?>
+
+            <hr>
+            <h2>バックアップ実行履歴</h2>
+            <?php
+            $history = get_option('wpgb_backup_history', []);
+            if ( empty($history) ) {
+                echo '<p>まだバックアップ履歴がありません。（履歴機能はバージョン1.0.3以降に実行されたものが記録・表示されます）</p>';
+            } else {
+                echo '<table class="wp-list-table widefat fixed striped" style="max-width: 800px; margin-top: 10px;">';
+                echo '<thead><tr><th style="width: 25%;">実行日時</th><th style="width: 50%;">バックアップ名</th><th style="width: 25%;">ファイルサイズ</th></tr></thead>';
+                echo '<tbody>';
+                foreach ( $history as $row ) {
+                    $date = date('Y年m月d日 H:i', strtotime($row['date']));
+                    // 1048576 = 1MB
+                    $size = $row['size'] ? size_format($row['size'], 2) : '不明';
+                    echo '<tr>';
+                    echo '<td>' . esc_html($date) . '</td>';
+                    echo '<td>' . esc_html($row['name']) . '</td>';
+                    echo '<td>' . esc_html($size) . '</td>';
+                    echo '</tr>';
+                }
+                echo '</tbody></table>';
+                echo '<p class="description">※直近50件までの履歴を表示します。</p>';
+            }
+            ?>
 
             <hr>
             <h2>手動バックアップの実行</h2>
