@@ -166,14 +166,15 @@ class WP_GDrive_Backup_Engine {
         
         $file_size = filesize($local_file_path);
         $chunkSizeBytes = 2 * 1024 * 1024; // 2MB chunk
-        $client->setDefer(true);
 
         // If resumeUri is not set, initialize upload session
         if ( empty($state['resumeUri']) ) {
+            $client->setDefer(false);
             $folder_id = $uploader->create_folder( $state['basename'] );
             if ( ! $folder_id ) throw new Exception("Google Driveへのフォルダ作成に失敗しました。");
             $state['folder_id'] = $folder_id;
 
+            $client->setDefer(true);
             $fileMetadata = new \Google\Service\Drive\DriveFile([
                 'name' => $state['basename'] . '.zip',
                 'parents' => [ $folder_id ]
@@ -197,6 +198,7 @@ class WP_GDrive_Backup_Engine {
         }
 
         // Resume upload
+        $client->setDefer(true);
         $request = $uploader->get_service()->files->create(new \Google\Service\Drive\DriveFile());
         $media = new \Google\Http\MediaFileUpload(
             $client, $request, 'application/zip', null, true, $chunkSizeBytes
