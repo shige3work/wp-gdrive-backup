@@ -1,0 +1,9 @@
+{
+    "name": "example/wp-gdrive-backup",
+    "description": "WordPress Google Drive Backup Plugin",
+    "type": "wordpress-plugin",
+    "require": {
+        "google/apiclient": "^2.15.0",
+        "yahnis-elsts/plugin-update-checker": "^5.4"
+    }
+}
