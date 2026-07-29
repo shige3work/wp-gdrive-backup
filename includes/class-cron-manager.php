@@ -5,32 +5,89 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class WP_GDrive_Cron_Manager {
     public static function init() {
-        add_filter( 'cron_schedules', [ __CLASS__, 'add_cron_schedules' ] );
         add_action( 'wp_gdrive_scheduled_backup_event', [ __CLASS__, 'execute_scheduled_backup' ] );
         add_action( 'update_option_wpgb_backup_interval', [ __CLASS__, 'update_schedule' ], 10, 2 );
+        add_action( 'update_option_wpgb_backup_monthly_day', [ __CLASS__, 'update_schedule' ], 10, 2 );
+        add_action( 'update_option_wpgb_backup_monthly_hour', [ __CLASS__, 'update_schedule' ], 10, 2 );
+        add_action( 'update_option_wpgb_backup_weekly_dow', [ __CLASS__, 'update_schedule' ], 10, 2 );
+        add_action( 'update_option_wpgb_backup_weekly_hour', [ __CLASS__, 'update_schedule' ], 10, 2 );
         
         self::schedule_event_if_needed();
     }
 
-    public static function add_cron_schedules( $schedules ) {
-        $schedules['monthly'] = [
-            'interval' => 30 * DAY_IN_SECONDS,
-            'display'  => '月に1回'
-        ];
-        return $schedules;
+    public static function calculate_next_timestamp() {
+        $interval = get_option('wpgb_backup_interval', 'weekly');
+        $tz_string = get_option('timezone_string');
+        if ( ! $tz_string ) {
+            $offset = get_option('gmt_offset', 0);
+            $hours = (int)$offset;
+            $minutes = abs($offset - $hours) * 60;
+            $tz_string = sprintf('%+03d:%02d', $hours, $minutes);
+        }
+        
+        try {
+            $tz = new DateTimeZone($tz_string);
+        } catch(Exception $e) {
+            $tz = new DateTimeZone('UTC');
+        }
+        
+        $now = new DateTime('now', $tz);
+
+        if ($interval === 'monthly') {
+            $day = (int) get_option('wpgb_backup_monthly_day', '1');
+            $hour = (int) get_option('wpgb_backup_monthly_hour', '3');
+            
+            $target = clone $now;
+            // Prevent day overflow (e.g. Feb 30 becomes Mar 2)
+            $max_day = (int) date('t', mktime(0,0,0, (int)$now->format('n'), 1, (int)$now->format('Y')));
+            $actual_day = min($day, $max_day);
+
+            $target->setDate((int)$now->format('Y'), (int)$now->format('n'), $actual_day);
+            $target->setTime($hour, 0, 0);
+            
+            if ($target <= $now) {
+                // Move to next month
+                $target->modify('first day of next month');
+                $max_day_next = (int) $target->format('t');
+                $actual_day_next = min($day, $max_day_next);
+                $target->setDate((int)$target->format('Y'), (int)$target->format('n'), $actual_day_next);
+                $target->setTime($hour, 0, 0);
+            }
+            return $target->getTimestamp();
+
+        } else {
+            // Weekly
+            $dow = (int) get_option('wpgb_backup_weekly_dow', '0'); // 0 (Sun) to 6 (Sat)
+            $hour = (int) get_option('wpgb_backup_weekly_hour', '3');
+            
+            $dows = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            $target_dow_str = $dows[$dow];
+            
+            $target = clone $now;
+            if ((int)$now->format('w') === $dow) {
+                $target->setTime($hour, 0, 0);
+                if ($target <= $now) {
+                    $target->modify("next {$target_dow_str}");
+                    $target->setTime($hour, 0, 0);
+                }
+            } else {
+                $target->modify("next {$target_dow_str}");
+                $target->setTime($hour, 0, 0);
+            }
+            return $target->getTimestamp();
+        }
     }
 
     public static function schedule_event_if_needed() {
         if ( ! wp_next_scheduled( 'wp_gdrive_scheduled_backup_event' ) ) {
-            $interval = get_option( 'wpgb_backup_interval', 'weekly' );
-            wp_schedule_event( time(), $interval, 'wp_gdrive_scheduled_backup_event' );
+            wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
         }
     }
 
     public static function update_schedule( $old_value, $new_value ) {
         if ( $old_value !== $new_value ) {
             wp_clear_scheduled_hook( 'wp_gdrive_scheduled_backup_event' );
-            wp_schedule_event( time(), $new_value, 'wp_gdrive_scheduled_backup_event' );
+            wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
         }
     }
 
@@ -46,5 +103,8 @@ class WP_GDrive_Cron_Manager {
         } catch ( Exception $e ) {
             WP_GDrive_Mailer::send_error_report( $e->getMessage() );
         }
+        
+        // バックアップ完了後、次回のスケジュールをセットする
+        wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
     }
 }

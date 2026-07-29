@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Google Drive Backup
  * Description: サイトのバックアップをZipとSQL形式で生成し、定期的にGoogle Driveへアップロードするプラグインです。
- * Version: 1.1.1
+ * Version: 1.1.2
  * Author: SHIGE3.WORK
  * Author URI: https://www.shige3.work
  * Text Domain: wp-gdrive-backup
@@ -89,6 +89,10 @@ class WP_GDrive_Backup {
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_gdrive_client_secret' );
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_gdrive_folder_id' );
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_backup_interval' );
+        register_setting( 'wp_gdrive_backup_settings', 'wpgb_backup_monthly_day' );
+        register_setting( 'wp_gdrive_backup_settings', 'wpgb_backup_monthly_hour' );
+        register_setting( 'wp_gdrive_backup_settings', 'wpgb_backup_weekly_dow' );
+        register_setting( 'wp_gdrive_backup_settings', 'wpgb_backup_weekly_hour' );
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_retention_period' );
         register_setting( 'wp_gdrive_backup_settings', 'wpgb_report_email' );
     }
@@ -188,11 +192,69 @@ class WP_GDrive_Backup {
                         <th scope="row"><label for="wpgb_backup_interval">バックアップ間隔</label></th>
                         <td>
                             <select name="wpgb_backup_interval" id="wpgb_backup_interval">
-                                <?php $interval = get_option( 'wpgb_backup_interval', 'weekly' ); ?>
-                                <option value="daily" <?php selected( $interval, 'daily' ); ?>>毎日</option>
-                                <option value="weekly" <?php selected( $interval, 'weekly' ); ?>>週に1回</option>
+                                <?php 
+                                    $interval = get_option( 'wpgb_backup_interval', 'monthly' );
+                                    // 既存のdailyが設定されている場合はweekly等に自動変換する対応（表示上）
+                                    if ($interval === 'daily') $interval = 'weekly';
+                                ?>
                                 <option value="monthly" <?php selected( $interval, 'monthly' ); ?>>月に1回</option>
+                                <option value="weekly" <?php selected( $interval, 'weekly' ); ?>>週に1回</option>
                             </select>
+
+                            <div id="wpgb_schedule_monthly_options" style="margin-top: 10px; display: <?php echo $interval === 'monthly' ? 'block' : 'none'; ?>;">
+                                <?php 
+                                    $monthly_day = get_option('wpgb_backup_monthly_day', '1');
+                                    $monthly_hour = get_option('wpgb_backup_monthly_hour', '3');
+                                ?>
+                                毎月 
+                                <select name="wpgb_backup_monthly_day">
+                                    <?php for($i=1; $i<=28; $i++): ?>
+                                        <option value="<?php echo $i; ?>" <?php selected($monthly_day, (string)$i); ?>><?php echo $i; ?>日</option>
+                                    <?php endfor; ?>
+                                </select>
+                                の 
+                                <select name="wpgb_backup_monthly_hour">
+                                    <?php for($i=0; $i<=23; $i++): ?>
+                                        <option value="<?php echo $i; ?>" <?php selected($monthly_hour, (string)$i); ?>><?php echo sprintf('%02d', $i); ?>時</option>
+                                    <?php endfor; ?>
+                                </select>
+                                に実行する
+                            </div>
+
+                            <div id="wpgb_schedule_weekly_options" style="margin-top: 10px; display: <?php echo $interval === 'weekly' ? 'block' : 'none'; ?>;">
+                                <?php 
+                                    $weekly_dow = get_option('wpgb_backup_weekly_dow', '0'); // 0=Sunday
+                                    $weekly_hour = get_option('wpgb_backup_weekly_hour', '3');
+                                    $dows = ['日', '月', '火', '水', '木', '金', '土'];
+                                ?>
+                                毎週 
+                                <select name="wpgb_backup_weekly_dow">
+                                    <?php foreach($dows as $index => $label): ?>
+                                        <option value="<?php echo $index; ?>" <?php selected($weekly_dow, (string)$index); ?>><?php echo $label; ?>曜日</option>
+                                    <?php endforeach; ?>
+                                </select>
+                                の 
+                                <select name="wpgb_backup_weekly_hour">
+                                    <?php for($i=0; $i<=23; $i++): ?>
+                                        <option value="<?php echo $i; ?>" <?php selected($weekly_hour, (string)$i); ?>><?php echo sprintf('%02d', $i); ?>時</option>
+                                    <?php endfor; ?>
+                                </select>
+                                に実行する
+                            </div>
+
+                            <script>
+                            jQuery(document).ready(function($) {
+                                $('#wpgb_backup_interval').on('change', function() {
+                                    if ($(this).val() === 'monthly') {
+                                        $('#wpgb_schedule_monthly_options').show();
+                                        $('#wpgb_schedule_weekly_options').hide();
+                                    } else {
+                                        $('#wpgb_schedule_monthly_options').hide();
+                                        $('#wpgb_schedule_weekly_options').show();
+                                    }
+                                });
+                            });
+                            </script>
                         </td>
                     </tr>
                     <tr>
