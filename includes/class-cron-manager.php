@@ -6,13 +6,27 @@ if ( ! defined( 'ABSPATH' ) ) {
 class WP_GDrive_Cron_Manager {
     public static function init() {
         add_action( 'wp_gdrive_scheduled_backup_event', [ __CLASS__, 'execute_scheduled_backup' ] );
-        add_action( 'update_option_wpgb_backup_interval', [ __CLASS__, 'update_schedule' ], 10, 2 );
-        add_action( 'update_option_wpgb_backup_monthly_day', [ __CLASS__, 'update_schedule' ], 10, 2 );
-        add_action( 'update_option_wpgb_backup_monthly_hour', [ __CLASS__, 'update_schedule' ], 10, 2 );
-        add_action( 'update_option_wpgb_backup_weekly_dow', [ __CLASS__, 'update_schedule' ], 10, 2 );
-        add_action( 'update_option_wpgb_backup_weekly_hour', [ __CLASS__, 'update_schedule' ], 10, 2 );
+        
+        // Settings changed hooks
+        add_action( 'added_option', [ __CLASS__, 'on_option_changed' ], 10, 3 );
+        add_action( 'updated_option', [ __CLASS__, 'on_option_changed' ], 10, 3 );
         
         self::schedule_event_if_needed();
+    }
+
+    public static function on_option_changed( $option, $old_value, $value ) {
+        $trigger_options = [
+            'wpgb_backup_interval',
+            'wpgb_backup_monthly_day',
+            'wpgb_backup_monthly_hour',
+            'wpgb_backup_weekly_dow',
+            'wpgb_backup_weekly_hour',
+        ];
+        
+        if ( in_array( $option, $trigger_options ) ) {
+            wp_clear_scheduled_hook( 'wp_gdrive_scheduled_backup_event' );
+            wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
+        }
     }
 
     public static function calculate_next_timestamp() {
@@ -79,14 +93,16 @@ class WP_GDrive_Cron_Manager {
     }
 
     public static function schedule_event_if_needed() {
-        if ( ! wp_next_scheduled( 'wp_gdrive_scheduled_backup_event' ) ) {
-            wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
+        // Clear any old recurring events (from v1.1.1 and earlier)
+        if ( wp_next_scheduled( 'wp_gdrive_scheduled_backup_event' ) ) {
+            $schedule = wp_get_schedule( 'wp_gdrive_scheduled_backup_event' );
+            if ( $schedule ) { 
+                // If $schedule is not false, it's a recurring event!
+                wp_clear_scheduled_hook( 'wp_gdrive_scheduled_backup_event' );
+            }
         }
-    }
 
-    public static function update_schedule( $old_value, $new_value ) {
-        if ( $old_value !== $new_value ) {
-            wp_clear_scheduled_hook( 'wp_gdrive_scheduled_backup_event' );
+        if ( ! wp_next_scheduled( 'wp_gdrive_scheduled_backup_event' ) ) {
             wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
         }
     }
