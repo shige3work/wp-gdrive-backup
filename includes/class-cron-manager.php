@@ -14,7 +14,7 @@ class WP_GDrive_Cron_Manager {
         self::schedule_event_if_needed();
     }
 
-    public static function on_option_changed( $option, $old_value, $value ) {
+    public static function on_option_changed( $option, $old_value = null, $value = null ) {
         $trigger_options = [
             'wpgb_backup_interval',
             'wpgb_backup_monthly_day',
