@@ -139,6 +139,8 @@ class WP_GDrive_Cron_Manager {
                     
                     if ( $processed >= $total || $processed >= 999999999 ) {
                         wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['finalize', 0] );
+                    } else if ( $processed === -1 ) {
+                        wp_schedule_single_event( time() + 15, 'wpgb_async_cron_step', ['zip', -1] );
                     } else {
                         wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['zip', $processed] );
                     }

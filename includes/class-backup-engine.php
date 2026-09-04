@@ -113,11 +113,31 @@ class WP_GDrive_Backup_Engine {
         $root_path = untrailingslashit( ABSPATH );
         $zip_file = $state['zip_file'];
         
+        $zip_done_file = $this->backup_dir . '/zip_done.txt';
+        $zip_error_file = $this->backup_dir . '/zip_error.txt';
+
+        if ( $offset === -1 ) {
+            if ( file_exists($zip_done_file) ) {
+                @unlink($zip_done_file);
+                @unlink($zip_error_file);
+                WP_GDrive_Logger::log("Background zip CLI completed successfully.");
+                return ['processed' => 999999999];
+            } else if ( file_exists($zip_error_file) ) {
+                $err = file_get_contents($zip_error_file);
+                @unlink($zip_done_file);
+                @unlink($zip_error_file);
+                WP_GDrive_Logger::log("Background zip CLI failed. Output: {$err}. Falling back to PHP ZipArchive.", 'WARNING');
+                $offset = 0; // Fallback to standard chunking
+            } else {
+                return ['processed' => -1];
+            }
+        }
+
         // Try CLI zip on first chunk if available
         if ( $offset == 0 && function_exists('exec') && ! in_array('exec', array_map('trim', explode(',', ini_get('disable_functions')))) ) {
             $zip_path = exec('which zip');
             if ( $zip_path ) {
-                WP_GDrive_Logger::log("Using zip CLI: {$zip_path}");
+                WP_GDrive_Logger::log("Starting zip CLI in background: {$zip_path}");
                 
                 // Exclude dirs
                 $exclude_str = "";
@@ -132,22 +152,22 @@ class WP_GDrive_Backup_Engine {
                     $exclude_str .= " -x " . escapeshellarg($ex);
                 }
 
+                @unlink($zip_done_file);
+                @unlink($zip_error_file);
+
+                // Run in background using parentheses and &
                 $cmd = sprintf(
-                    "cd %s && %s -r -q %s . %s 2>&1",
+                    "cd %s && ( %s -r -q %s . %s > /dev/null 2>&1 && touch %s || echo 'error' > %s ) > /dev/null 2>&1 &",
                     escapeshellarg($root_path),
                     escapeshellcmd($zip_path),
                     escapeshellarg($zip_file),
-                    $exclude_str
+                    $exclude_str,
+                    escapeshellarg($zip_done_file),
+                    escapeshellarg($zip_error_file)
                 );
                 
-                exec($cmd, $output, $return_var);
-                if ( $return_var === 0 ) {
-                    WP_GDrive_Logger::log("zip CLI completed successfully.");
-                    // Return a huge number to indicate it's fully done
-                    return ['processed' => 999999999];
-                } else {
-                    WP_GDrive_Logger::log("zip CLI failed with code {$return_var}. Output: " . implode(" ", $output) . ". Falling back to PHP ZipArchive.", 'WARNING');
-                }
+                exec($cmd);
+                return ['processed' => -1];
             }
         }
         
