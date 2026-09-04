@@ -114,22 +114,43 @@ class WP_GDrive_Backup_Engine {
         $zip_file = $state['zip_file'];
         
         $zip_done_file = $this->backup_dir . '/zip_done.txt';
-        $zip_error_file = $this->backup_dir . '/zip_error.txt';
+        $zip_exit_code_file = $this->backup_dir . '/zip_exit_code.txt';
+        $zip_output_log = $this->backup_dir . '/zip_output.log';
 
         if ( $offset === -1 ) {
             if ( file_exists($zip_done_file) ) {
+                $exit_code = file_exists($zip_exit_code_file) ? intval(trim(file_get_contents($zip_exit_code_file))) : 0;
+                $zip_log = file_exists($zip_output_log) ? file_get_contents($zip_output_log) : '';
+                
                 @unlink($zip_done_file);
-                @unlink($zip_error_file);
-                WP_GDrive_Logger::log("Background zip CLI completed successfully.");
-                return ['processed' => 999999999];
-            } else if ( file_exists($zip_error_file) ) {
-                $err = file_exists($zip_error_file) ? file_get_contents($zip_error_file) : '';
-                @unlink($zip_done_file);
-                @unlink($zip_error_file);
-                WP_GDrive_Logger::log("Background zip CLI failed. Output: {$err}. Falling back to PHP ZipArchive.", 'WARNING');
-                $offset = 0; // Fallback to standard chunking
+                @unlink($zip_exit_code_file);
+                @unlink($zip_output_log);
+
+                // In Info-ZIP on live servers:
+                // 0 = OK
+                // 1 = Warning (e.g. some file permissions or unreadable file)
+                // 12 = Warning (nothing to do or files skipped)
+                // 18 = Warning (file modified while being read, e.g. active log file)
+                if ( in_array($exit_code, [0, 1, 12, 18]) && file_exists($zip_file) && filesize($zip_file) > 1024 * 1024 ) {
+                    WP_GDrive_Logger::log("Background zip CLI completed successfully (Exit code: {$exit_code}, Size: " . size_format(filesize($zip_file), 2) . ").");
+                    return ['processed' => 999999999];
+                } else {
+                    $last_lines = implode(" ", array_slice(explode("\n", trim($zip_log)), -5));
+                    WP_GDrive_Logger::log("Background zip CLI failed with code {$exit_code}. Log tail: {$last_lines}. Falling back to PHP ZipArchive.", 'WARNING');
+                    $state['cli_zip_failed'] = true;
+                    file_put_contents($this->state_path, wp_json_encode($state));
+                    $offset = 0; // Fallback to standard chunking
+                }
             } else {
-                $current_size = file_exists($zip_file) ? filesize($zip_file) : 0;
+                $current_size = 0;
+                if ( file_exists($zip_file) ) {
+                    $current_size = filesize($zip_file);
+                } else {
+                    $temp_zips = glob($this->backup_dir . '/zi*');
+                    if ( ! empty($temp_zips) ) {
+                        $current_size = filesize($temp_zips[0]);
+                    }
+                }
                 $size_formatted = size_format($current_size, 1);
                 return [
                     'processed' => -1,
@@ -139,37 +160,41 @@ class WP_GDrive_Backup_Engine {
             }
         }
 
-        // Try CLI zip on first chunk if available
-        if ( $offset == 0 && function_exists('exec') && ! in_array('exec', array_map('trim', explode(',', ini_get('disable_functions')))) ) {
+        // Try CLI zip on first chunk if available and not previously failed
+        if ( $offset == 0 && empty($state['cli_zip_failed']) && function_exists('exec') && ! in_array('exec', array_map('trim', explode(',', ini_get('disable_functions')))) ) {
             $zip_path = exec('which zip');
             if ( $zip_path ) {
                 WP_GDrive_Logger::log("Starting zip CLI in background: {$zip_path}");
                 
-                // Exclude dirs
+                // Exclude dirs and logs
                 $exclude_str = "";
                 $exclude_dirs = [
                     'wp-content/uploads/wp-gdrive-backups/*',
+                    'wp-content/uploads/wpgb_backups/*',
                     'wp-content/cache/*',
                     'wp-content/backups-dup-lite/*',
                     'wp-content/updraft/*',
-                    'wp-content/upgrade/*'
+                    'wp-content/upgrade/*',
+                    '*.log'
                 ];
                 foreach ($exclude_dirs as $ex) {
                     $exclude_str .= " -x " . escapeshellarg($ex);
                 }
 
                 @unlink($zip_done_file);
-                @unlink($zip_error_file);
+                @unlink($zip_exit_code_file);
+                @unlink($zip_output_log);
 
-                // Fully detach stdin, stdout, stderr with nohup to prevent PHP exec from blocking
+                // Run zip command, record exit code, and touch done file
                 $zip_cmd = sprintf(
-                    'cd %s && %s -r -q %s . %s && touch %s || echo "error" > %s',
+                    'cd %s && %s -r -q %s . %s > %s 2>&1; echo $? > %s; touch %s',
                     escapeshellarg($root_path),
                     escapeshellcmd($zip_path),
                     escapeshellarg($zip_file),
                     $exclude_str,
-                    escapeshellarg($zip_done_file),
-                    escapeshellarg($zip_error_file)
+                    escapeshellarg($zip_output_log),
+                    escapeshellarg($zip_exit_code_file),
+                    escapeshellarg($zip_done_file)
                 );
 
                 $full_cmd = 'nohup /bin/sh -c ' . escapeshellarg($zip_cmd) . ' > /dev/null 2>&1 &';
