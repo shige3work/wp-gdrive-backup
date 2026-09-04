@@ -123,13 +123,19 @@ class WP_GDrive_Backup_Engine {
                 WP_GDrive_Logger::log("Background zip CLI completed successfully.");
                 return ['processed' => 999999999];
             } else if ( file_exists($zip_error_file) ) {
-                $err = file_get_contents($zip_error_file);
+                $err = file_exists($zip_error_file) ? file_get_contents($zip_error_file) : '';
                 @unlink($zip_done_file);
                 @unlink($zip_error_file);
                 WP_GDrive_Logger::log("Background zip CLI failed. Output: {$err}. Falling back to PHP ZipArchive.", 'WARNING');
                 $offset = 0; // Fallback to standard chunking
             } else {
-                return ['processed' => -1];
+                $current_size = file_exists($zip_file) ? filesize($zip_file) : 0;
+                $size_formatted = size_format($current_size, 1);
+                return [
+                    'processed' => -1,
+                    'current_zip_size' => $current_size,
+                    'current_zip_formatted' => $size_formatted
+                ];
             }
         }
 
@@ -155,19 +161,28 @@ class WP_GDrive_Backup_Engine {
                 @unlink($zip_done_file);
                 @unlink($zip_error_file);
 
-                // Run in background using parentheses and &
-                $cmd = sprintf(
-                    "cd %s && ( %s -r -q %s . %s > /dev/null 2>&1 && touch %s || echo 'error' > %s ) > /dev/null 2>&1 &",
-                    escapeshellarg($root_path),
+                // Fully detach stdin, stdout, stderr with nohup to prevent PHP exec from blocking
+                $zip_cmd = sprintf(
+                    '%s -r -q %s . %s && touch %s || echo "error" > %s',
                     escapeshellcmd($zip_path),
                     escapeshellarg($zip_file),
                     $exclude_str,
                     escapeshellarg($zip_done_file),
                     escapeshellarg($zip_error_file)
                 );
+
+                $full_cmd = sprintf(
+                    'cd %s && nohup /bin/sh -c %s </dev/null >/dev/null 2>&1 &',
+                    escapeshellarg($root_path),
+                    escapeshellarg($zip_cmd)
+                );
                 
-                exec($cmd);
-                return ['processed' => -1];
+                exec($full_cmd);
+                return [
+                    'processed' => -1,
+                    'current_zip_size' => 0,
+                    'current_zip_formatted' => '0 B'
+                ];
             }
         }
         
