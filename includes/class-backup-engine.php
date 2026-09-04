@@ -163,7 +163,8 @@ class WP_GDrive_Backup_Engine {
 
                 // Fully detach stdin, stdout, stderr with nohup to prevent PHP exec from blocking
                 $zip_cmd = sprintf(
-                    '%s -r -q %s . %s && touch %s || echo "error" > %s',
+                    'cd %s && %s -r -q %s . %s && touch %s || echo "error" > %s',
+                    escapeshellarg($root_path),
                     escapeshellcmd($zip_path),
                     escapeshellarg($zip_file),
                     $exclude_str,
@@ -171,11 +172,7 @@ class WP_GDrive_Backup_Engine {
                     escapeshellarg($zip_error_file)
                 );
 
-                $full_cmd = sprintf(
-                    'cd %s && nohup /bin/sh -c %s </dev/null >/dev/null 2>&1 &',
-                    escapeshellarg($root_path),
-                    escapeshellarg($zip_cmd)
-                );
+                $full_cmd = 'nohup /bin/sh -c ' . escapeshellarg($zip_cmd) . ' > /dev/null 2>&1 &';
                 
                 exec($full_cmd);
                 return [
