@@ -36,6 +36,7 @@ if ( class_exists( 'YahnisElsts\PluginUpdateChecker\v5\PucFactory' ) ) {
 
 // Load includes
 $includes = [
+    'includes/class-logger.php',
     'includes/class-db-dumper.php',
     'includes/class-backup-engine.php',
     'includes/class-gdrive-uploader.php',
@@ -66,6 +67,11 @@ class WP_GDrive_Backup {
         add_action( 'wp_ajax_wpgb_chunk_step', array( $this, 'ajax_chunk_step' ) );
         add_action( 'wp_ajax_wpgb_prepare_retry_upload', array( $this, 'ajax_prepare_retry_upload' ) );
         
+        // Handle clear logs action
+        if ( isset($_POST['wpgb_clear_logs']) && check_admin_referer('wpgb_clear_logs') ) {
+            WP_GDrive_Logger::clear_logs();
+        }
+
         // Initialize cron manager
         if ( class_exists( 'WP_GDrive_Cron_Manager' ) ) {
             WP_GDrive_Cron_Manager::init();
@@ -134,10 +140,25 @@ class WP_GDrive_Backup {
         }
         
         $refresh_token = get_option('wpgb_gdrive_refresh_token');
+        $active_tab = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'settings';
+
+        echo '<div class="wrap">';
+        echo '<h1>Google Drive Backup Settings</h1>';
+
+        echo '<h2 class="nav-tab-wrapper">';
+        echo '<a href="?page=wp-gdrive-backup&tab=settings" class="nav-tab ' . ($active_tab == 'settings' ? 'nav-tab-active' : '') . '">設定</a>';
+        echo '<a href="?page=wp-gdrive-backup&tab=logs" class="nav-tab ' . ($active_tab == 'logs' ? 'nav-tab-active' : '') . '">エラーログ</a>';
+        echo '</h2>';
+
+        if ( $active_tab == 'logs' ) {
+            $this->render_logs_tab();
+            echo '</div>';
+            return;
+        }
+
+        // --- Settings Tab ---
         ?>
-        <div class="wrap">
-            <h1>WP Google Drive Backup 設定</h1>
-            <form action="options.php" method="post">
+        <form action="options.php" method="post">
                 <?php
                 settings_fields( 'wp_gdrive_backup_settings' );
                 do_settings_sections( 'wp_gdrive_backup_settings' );
@@ -508,6 +529,22 @@ class WP_GDrive_Backup {
                 });
             });
             </script>
+            <?php
+            echo '</div>'; // close wrap
+    }
+
+    private function render_logs_tab() {
+        ?>
+        <div style="margin-top: 20px;">
+            <h3>システムログ</h3>
+            <p class="description">バックアップ処理の進行状況やエラーをここに記録します。（最新1000行）</p>
+            
+            <textarea readonly style="width: 100%; height: 500px; font-family: monospace; background: #f0f0f1; padding: 10px;"><?php echo esc_textarea( WP_GDrive_Logger::get_logs() ); ?></textarea>
+
+            <form method="post" style="margin-top: 10px;">
+                <?php wp_nonce_field('wpgb_clear_logs'); ?>
+                <button type="submit" name="wpgb_clear_logs" class="button">ログをクリアする</button>
+            </form>
         </div>
         <?php
     }

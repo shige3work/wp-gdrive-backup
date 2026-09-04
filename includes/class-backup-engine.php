@@ -90,10 +90,20 @@ class WP_GDrive_Backup_Engine {
         fclose($fp);
         fclose($skipped_fp);
 
+        $state['total_files'] = $count;
+        file_put_contents($this->state_path, wp_json_encode($state));
+
         return [
             'total_files' => $count,
             'message' => "ファイル一覧を作成しました。全 {$count} ファイル"
         ];
+    }
+
+    public function get_state() {
+        if ( file_exists($this->state_path) ) {
+            return json_decode(file_get_contents($this->state_path), true);
+        }
+        return false;
     }
 
     public function step_zip_chunk($offset, $limit = 2000000) {
@@ -102,8 +112,52 @@ class WP_GDrive_Backup_Engine {
 
         $root_path = untrailingslashit( ABSPATH );
         $zip_file = $state['zip_file'];
+        
+        // Try CLI zip on first chunk if available
+        if ( $offset == 0 && function_exists('exec') && ! in_array('exec', array_map('trim', explode(',', ini_get('disable_functions')))) ) {
+            $zip_path = exec('which zip');
+            if ( $zip_path ) {
+                WP_GDrive_Logger::log("Using zip CLI: {$zip_path}");
+                
+                // Exclude dirs
+                $exclude_str = "";
+                $exclude_dirs = [
+                    'wp-content/uploads/wp-gdrive-backups/*',
+                    'wp-content/cache/*',
+                    'wp-content/backups-dup-lite/*',
+                    'wp-content/updraft/*',
+                    'wp-content/upgrade/*'
+                ];
+                foreach ($exclude_dirs as $ex) {
+                    $exclude_str .= " -x " . escapeshellarg($ex);
+                }
+
+                $cmd = sprintf(
+                    "cd %s && %s -r -q %s . %s 2>&1",
+                    escapeshellarg($root_path),
+                    escapeshellcmd($zip_path),
+                    escapeshellarg($zip_file),
+                    $exclude_str
+                );
+                
+                exec($cmd, $output, $return_var);
+                if ( $return_var === 0 ) {
+                    WP_GDrive_Logger::log("zip CLI completed successfully.");
+                    // Return a huge number to indicate it's fully done
+                    return ['processed' => 999999999];
+                } else {
+                    WP_GDrive_Logger::log("zip CLI failed with code {$return_var}. Output: " . implode(" ", $output) . ". Falling back to PHP ZipArchive.", 'WARNING');
+                }
+            }
+        }
+        
+        if ( $offset == 0 ) {
+            WP_GDrive_Logger::log("zip CLI not available or failed. Using PHP ZipArchive (Chunking).");
+        }
+
         $zip = new ZipArchive();
         if ( $zip->open($zip_file, ZipArchive::CREATE) !== true ) {
+            WP_GDrive_Logger::log("ZipArchive Open Failed: " . $zip_file, 'ERROR');
             throw new Exception("Zipファイルの作成/展開に失敗しました。");
         }
 
@@ -136,6 +190,8 @@ class WP_GDrive_Backup_Engine {
         }
         fclose($fp);
         $zip->close();
+        
+        WP_GDrive_Logger::log("Zip chunk processed: " . ($offset + $added) . " files added.");
 
         return ['processed' => $offset + $added];
     }
@@ -222,8 +278,12 @@ class WP_GDrive_Backup_Engine {
             }
         }
         fclose($handle);
+        
+        $percent = round(($state['uploadOffset'] / $file_size) * 100, 1);
+        WP_GDrive_Logger::log("Upload progress: {$percent}% ({$state['uploadOffset']} / {$file_size} bytes)");
 
         if ($status) {
+            WP_GDrive_Logger::log("Zip upload completed. Uploading installer...");
             // ZIP upload is done. Upload the tiny installer synchronously.
             $client->setDefer(false);
             $uploader->upload_file( $state['installer_file'], 'installer.php', $state['folder_id'] );

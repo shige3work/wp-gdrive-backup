@@ -43,8 +43,8 @@ class WP_GDrive_Cron_Manager {
             $tz = new DateTimeZone($tz_string);
         } catch(Exception $e) {
             $tz = new DateTimeZone('UTC');
-        }
-        
+        $interval = get_option('wpgb_backup_interval', 'monthly');
+        $tz = wp_timezone();
         $now = new DateTime('now', $tz);
 
         if ($interval === 'monthly') {
@@ -93,34 +93,81 @@ class WP_GDrive_Cron_Manager {
     }
 
     public static function schedule_event_if_needed() {
-        // Clear any old recurring events (from v1.1.1 and earlier)
         if ( wp_next_scheduled( 'wp_gdrive_scheduled_backup_event' ) ) {
             $schedule = wp_get_schedule( 'wp_gdrive_scheduled_backup_event' );
             if ( $schedule ) { 
-                // If $schedule is not false, it's a recurring event!
                 wp_clear_scheduled_hook( 'wp_gdrive_scheduled_backup_event' );
             }
         }
-
         if ( ! wp_next_scheduled( 'wp_gdrive_scheduled_backup_event' ) ) {
             wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
         }
     }
 
-    public static function execute_scheduled_backup() {
+    public static function start_scheduled_backup() {
+        WP_GDrive_Logger::log("=== Scheduled Backup Triggered ===");
+        
+        // 次回のスケジュールを確実にセットしておく
+        wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
+        
+        // 非同期バケツリレーの最初のステップをキックする
+        wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['init', 0] );
+    }
+
+    public static function execute_cron_step( $step, $offset ) {
         set_time_limit(0);
+        ignore_user_abort(true);
+
         try {
             $engine = new WP_GDrive_Backup_Engine();
-            $result = $engine->run_backup();
-
-            if ( $result ) {
-                WP_GDrive_Mailer::send_success_report( $engine->get_last_backup_info() );
+            $result = [];
+            
+            WP_GDrive_Logger::log("Cron Step [{$step}] (Offset: {$offset}) starting...");
+            
+            switch ($step) {
+                case 'init':
+                    $result = $engine->step_init();
+                    wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['zip', 0] );
+                    break;
+                case 'zip':
+                    $result = $engine->step_zip_chunk($offset, 2000);
+                    $processed = $result['processed'];
+                    
+                    $state = $engine->get_state();
+                    $total = isset($state['total_files']) ? $state['total_files'] : 999999999;
+                    
+                    if ( $processed >= $total || $processed >= 999999999 ) {
+                        wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['finalize', 0] );
+                    } else {
+                        wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['zip', $processed] );
+                    }
+                    break;
+                case 'finalize':
+                    $result = $engine->step_finalize_zip();
+                    wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['upload', 0] );
+                    break;
+                case 'upload':
+                    $result = $engine->step_upload();
+                    if ( isset($result['done']) && $result['done'] ) {
+                        wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['cleanup', 0] );
+                    } else {
+                        wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['upload', 0] );
+                    }
+                    break;
+                case 'cleanup':
+                    $result = $engine->step_cleanup();
+                    WP_GDrive_Mailer::send_success_report( $engine->get_last_backup_info() );
+                    WP_GDrive_Logger::log("=== Scheduled Backup Fully Completed ===");
+                    break;
             }
         } catch ( Exception $e ) {
+            WP_GDrive_Logger::log("Cron Error in step {$step}: " . $e->getMessage(), 'ERROR');
             WP_GDrive_Mailer::send_error_report( $e->getMessage() );
+            // 異常終了時に状態をクリーンアップ
+            try {
+                $engine = new WP_GDrive_Backup_Engine();
+                $engine->step_abort();
+            } catch (Exception $ex) {}
         }
-        
-        // バックアップ完了後、次回のスケジュールをセットする
-        wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
     }
 }
