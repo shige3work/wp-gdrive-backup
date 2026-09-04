@@ -43,8 +43,9 @@ class WP_GDrive_Cron_Manager {
             $tz = new DateTimeZone($tz_string);
         } catch(Exception $e) {
             $tz = new DateTimeZone('UTC');
+        }
+        
         $interval = get_option('wpgb_backup_interval', 'monthly');
-        $tz = wp_timezone();
         $now = new DateTime('now', $tz);
 
         if ($interval === 'monthly') {
