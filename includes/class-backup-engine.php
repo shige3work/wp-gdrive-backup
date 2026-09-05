@@ -22,6 +22,10 @@ class WP_GDrive_Backup_Engine {
     }
 
     public function step_init() {
+        // Trigger pre-backup cleanup hook (WP Storage Cleaner integration)
+        WP_GDrive_Logger::log("Triggering pre-backup hook (wpgb_before_backup_start)...");
+        do_action( 'wpgb_before_backup_start' );
+
         $site_name = preg_replace('/[^a-zA-Z0-9_-]/', '', get_bloginfo('name'));
         if ( empty($site_name) ) $site_name = 'wordpress';
         $timestamp = date( 'Ymd_His' );
