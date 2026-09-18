@@ -95,6 +95,17 @@ class WP_GDrive_Cron_Manager {
     }
 
     public static function schedule_event_if_needed() {
+        // Watchdog: Check if a stuck backup state exists (> 3 hours old)
+        $upload_dir = wp_upload_dir();
+        $state_path = $upload_dir['basedir'] . '/wp-gdrive-backups/backup_state.json';
+        if ( file_exists($state_path) && ( time() - filemtime($state_path) > 3 * HOUR_IN_SECONDS ) ) {
+            WP_GDrive_Logger::log("Watchdog: Found stuck backup state from " . date('Y-m-d H:i:s', filemtime($state_path)) . ". Cleaning up and resetting...", 'WARNING');
+            try {
+                $engine = new WP_GDrive_Backup_Engine();
+                $engine->step_abort();
+            } catch (Exception $ex) {}
+        }
+
         if ( wp_next_scheduled( 'wp_gdrive_scheduled_backup_event' ) ) {
             $schedule = wp_get_schedule( 'wp_gdrive_scheduled_backup_event' );
             if ( $schedule ) { 
@@ -109,7 +120,7 @@ class WP_GDrive_Cron_Manager {
     public static function start_scheduled_backup() {
         WP_GDrive_Logger::log("=== Scheduled Backup Triggered ===");
         
-        // 次回のスケジュールを確実にセットしておく
+        // 次回のスケジュール（翌月/翌週）を確実にセットしておく
         wp_schedule_single_event( self::calculate_next_timestamp(), 'wp_gdrive_scheduled_backup_event' );
         
         // 非同期バケツリレーの最初のステップをキックする
@@ -119,6 +130,15 @@ class WP_GDrive_Cron_Manager {
     public static function execute_cron_step( $step, $offset ) {
         set_time_limit(0);
         ignore_user_abort(true);
+
+        // Register shutdown function to catch any fatal error / timeout in cron
+        register_shutdown_function(function() use ($step) {
+            $error = error_get_last();
+            if ( $error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR]) ) {
+                WP_GDrive_Logger::log("Fatal Shutdown in step {$step}: " . $error['message'], 'ERROR');
+                self::handle_step_failure($step, "サーバーの致命的エラー/強制終了: " . $error['message']);
+            }
+        });
 
         try {
             $engine = new WP_GDrive_Backup_Engine();
@@ -160,18 +180,39 @@ class WP_GDrive_Cron_Manager {
                     break;
                 case 'cleanup':
                     $result = $engine->step_cleanup();
+                    // Reset retry counter on success
+                    delete_option( 'wpgb_backup_retry_count' );
                     WP_GDrive_Mailer::send_success_report( $engine->get_last_backup_info() );
                     WP_GDrive_Logger::log("=== Scheduled Backup Fully Completed ===");
                     break;
             }
         } catch ( Exception $e ) {
-            WP_GDrive_Logger::log("Cron Error in step {$step}: " . $e->getMessage(), 'ERROR');
-            WP_GDrive_Mailer::send_error_report( $e->getMessage() );
-            // 異常終了時に状態をクリーンアップ
-            try {
-                $engine = new WP_GDrive_Backup_Engine();
-                $engine->step_abort();
-            } catch (Exception $ex) {}
+            self::handle_step_failure($step, $e->getMessage());
+        }
+    }
+
+    private static function handle_step_failure( $step, $error_message ) {
+        WP_GDrive_Logger::log("Cron Failure in step {$step}: {$error_message}", 'ERROR');
+
+        // Cleanup temporary state
+        try {
+            $engine = new WP_GDrive_Backup_Engine();
+            $engine->step_abort();
+        } catch (Exception $ex) {}
+
+        $retry_count = (int) get_option( 'wpgb_backup_retry_count', 0 ) + 1;
+        update_option( 'wpgb_backup_retry_count', $retry_count );
+
+        if ( $retry_count < 3 ) {
+            // Retry in 1 hour
+            wp_schedule_single_event( time() + HOUR_IN_SECONDS, 'wpgb_async_cron_step', ['init', 0] );
+            WP_GDrive_Logger::log("Scheduling automatic retry attempt {$retry_count}/3 in 1 hour...", 'WARNING');
+            WP_GDrive_Mailer::send_error_report( $error_message, true, $retry_count );
+        } else {
+            // Max retries reached: Reset and send critical alert recommending manual backup
+            delete_option( 'wpgb_backup_retry_count' );
+            WP_GDrive_Logger::log("Max retries (3/3) reached. Sending critical failure alert recommending manual backup.", 'ERROR');
+            WP_GDrive_Mailer::send_critical_failure_alert( $error_message );
         }
     }
 }
