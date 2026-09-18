@@ -13,6 +13,122 @@ class WP_GDrive_Cron_Manager {
         add_action( 'updated_option', [ __CLASS__, 'on_option_changed' ], 10, 3 );
         
         self::schedule_event_if_needed();
+        self::check_and_run_missed_backup();
+    }
+
+    public static function check_and_run_missed_backup() {
+        // Only run if Google Drive is authenticated
+        $refresh_token = get_option( 'wpgb_gdrive_refresh_token' );
+        if ( empty( $refresh_token ) ) {
+            return;
+        }
+
+        // Check if a backup is currently running or scheduled immediately
+        if ( wp_next_scheduled( 'wpgb_async_cron_step' ) ) {
+            return;
+        }
+
+        $upload_dir = wp_upload_dir();
+        $state_path = $upload_dir['basedir'] . '/wp-gdrive-backups/backup_state.json';
+        if ( file_exists( $state_path ) ) {
+            return;
+        }
+
+        $tz_string = get_option('timezone_string');
+        if ( ! $tz_string ) {
+            $offset = get_option('gmt_offset', 0);
+            $hours = (int)$offset;
+            $minutes = abs($offset - $hours) * 60;
+            $tz_string = sprintf('%+03d:%02d', $hours, $minutes);
+        }
+        
+        try {
+            $tz = new DateTimeZone($tz_string);
+        } catch(Exception $e) {
+            $tz = new DateTimeZone('UTC');
+        }
+
+        $interval = get_option('wpgb_backup_interval', 'monthly');
+        $now = new DateTime('now', $tz);
+        $history = get_option('wpgb_backup_history', []);
+
+        if ( $interval === 'monthly' ) {
+            $day = (int) get_option('wpgb_backup_monthly_day', '1');
+            $hour = (int) get_option('wpgb_backup_monthly_hour', '3');
+            
+            $max_day = (int) date('t', mktime(0, 0, 0, (int)$now->format('n'), 1, (int)$now->format('Y')));
+            $actual_day = min($day, $max_day);
+
+            $scheduled_this_month = clone $now;
+            $scheduled_this_month->setDate((int)$now->format('Y'), (int)$now->format('n'), $actual_day);
+            $scheduled_this_month->setTime($hour, 0, 0);
+
+            // If scheduled time for this month has passed
+            if ( $scheduled_this_month <= $now ) {
+                $period_key = $now->format('Y-m');
+                $last_catchup = get_option( 'wpgb_last_catchup_period', '' );
+                
+                // If we haven't already triggered catch-up for this month
+                if ( $last_catchup !== $period_key ) {
+                    $has_backup_this_period = false;
+                    foreach ( $history as $item ) {
+                        if ( ! empty( $item['date'] ) ) {
+                            $item_time = strtotime( $item['date'] );
+                            if ( date( 'Y-m', $item_time ) === $period_key ) {
+                                $has_backup_this_period = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if ( ! $has_backup_this_period ) {
+                        update_option( 'wpgb_last_catchup_period', $period_key );
+                        WP_GDrive_Logger::log("【取りこぼし検知】今月({$period_key})のバックアップ予定日時(" . $scheduled_this_month->format('Y-m-d H:i') . ")を過ぎていますが、バックアップ履歴が存在しません。即時キャッチアップ・バックアップを開始します。", 'INFO');
+                        wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['init', 0] );
+                    }
+                }
+            }
+        } else {
+            // Weekly
+            $dow = (int) get_option('wpgb_backup_weekly_dow', '0'); // 0 (Sun) to 6 (Sat)
+            $hour = (int) get_option('wpgb_backup_weekly_hour', '3');
+
+            $dows = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            $target_dow_str = $dows[$dow];
+
+            // Scheduled time for this week's DOW
+            $current_dow = (int)$now->format('w');
+            $diff_days = $current_dow - $dow;
+            if ( $diff_days >= 0 ) {
+                $scheduled_this_week = clone $now;
+                $scheduled_this_week->modify("-{$diff_days} days");
+                $scheduled_this_week->setTime($hour, 0, 0);
+
+                if ( $scheduled_this_week <= $now ) {
+                    $period_key = $now->format('o-W'); // Year-Week
+                    $last_catchup = get_option( 'wpgb_last_catchup_period', '' );
+
+                    if ( $last_catchup !== $period_key ) {
+                        $has_backup_this_period = false;
+                        foreach ( $history as $item ) {
+                            if ( ! empty( $item['date'] ) ) {
+                                $item_time = strtotime( $item['date'] );
+                                if ( date( 'o-W', $item_time ) === $period_key ) {
+                                    $has_backup_this_period = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if ( ! $has_backup_this_period ) {
+                            update_option( 'wpgb_last_catchup_period', $period_key );
+                            WP_GDrive_Logger::log("【取りこぼし検知】今週({$period_key})のバックアップ予定日時(" . $scheduled_this_week->format('Y-m-d H:i') . ")を過ぎていますが、バックアップ履歴が存在しません。即時キャッチアップ・バックアップを開始します。", 'INFO');
+                            wp_schedule_single_event( time(), 'wpgb_async_cron_step', ['init', 0] );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     public static function on_option_changed( $option, $old_value = null, $value = null ) {
@@ -182,7 +298,6 @@ class WP_GDrive_Cron_Manager {
                     $result = $engine->step_cleanup();
                     // Reset retry counter on success
                     delete_option( 'wpgb_backup_retry_count' );
-                    WP_GDrive_Mailer::send_success_report( $engine->get_last_backup_info() );
                     WP_GDrive_Logger::log("=== Scheduled Backup Fully Completed ===");
                     break;
             }
