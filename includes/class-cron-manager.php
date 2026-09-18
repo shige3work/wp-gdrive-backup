@@ -5,7 +5,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class WP_GDrive_Cron_Manager {
     public static function init() {
-        add_action( 'wp_gdrive_scheduled_backup_event', [ __CLASS__, 'execute_scheduled_backup' ] );
+        add_action( 'wp_gdrive_scheduled_backup_event', [ __CLASS__, 'start_scheduled_backup' ] );
+        add_action( 'wpgb_async_cron_step', [ __CLASS__, 'execute_cron_step' ], 10, 2 );
         
         // Settings changed hooks
         add_action( 'added_option', [ __CLASS__, 'on_option_changed' ], 10, 3 );
