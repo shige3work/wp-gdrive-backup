@@ -307,27 +307,79 @@ class WP_GDrive_Cron_Manager {
     }
 
     private static function handle_step_failure( $step, $error_message ) {
-        WP_GDrive_Logger::log("Cron Failure in step {$step}: {$error_message}", 'ERROR');
-
-        // Cleanup temporary state
-        try {
-            $engine = new WP_GDrive_Backup_Engine();
-            $engine->step_abort();
-        } catch (Exception $ex) {}
+        WP_GDrive_Logger::log("Cron Failure in step {$step}: " . self::summarize_cron_error($error_message), 'ERROR');
 
         $retry_count = (int) get_option( 'wpgb_backup_retry_count', 0 ) + 1;
         update_option( 'wpgb_backup_retry_count', $retry_count );
 
-        if ( $retry_count < 3 ) {
-            // Retry in 1 hour
-            wp_schedule_single_event( time() + HOUR_IN_SECONDS, 'wpgb_async_cron_step', ['init', 0] );
-            WP_GDrive_Logger::log("Scheduling automatic retry attempt {$retry_count}/3 in 1 hour...", 'WARNING');
-            WP_GDrive_Mailer::send_error_report( $error_message, true, $retry_count );
+        if ( $step === 'upload' ) {
+            // Upload failure: DO NOT delete the zip file.
+            // Reset the resume URI so the next attempt starts a fresh upload session,
+            // but keep the zip intact to avoid re-creating a 1GB+ file from scratch.
+            try {
+                $upload_dir = wp_upload_dir();
+                $state_path = $upload_dir['basedir'] . '/wp-gdrive-backups/backup_state.json';
+                if ( file_exists($state_path) ) {
+                    $state = json_decode(file_get_contents($state_path), true);
+                    if ( $state ) {
+                        $state['resumeUri'] = '';
+                        $state['uploadOffset'] = 0;
+                        file_put_contents($state_path, wp_json_encode($state));
+                        WP_GDrive_Logger::log("Upload state reset (resumeUri cleared). Zip file preserved for retry.", 'INFO');
+                    }
+                }
+            } catch (Exception $ex) {}
+
+            if ( $retry_count < 3 ) {
+                // Retry upload in 10 minutes (shorter than 1 hour since zip is ready)
+                wp_schedule_single_event( time() + 10 * MINUTE_IN_SECONDS, 'wpgb_async_cron_step', ['upload', 0] );
+                WP_GDrive_Logger::log("Scheduling upload retry {$retry_count}/3 in 10 minutes (zip preserved)...", 'WARNING');
+                WP_GDrive_Mailer::send_error_report( $error_message, true, $retry_count );
+            } else {
+                // Max retries reached
+                delete_option( 'wpgb_backup_retry_count' );
+                WP_GDrive_Logger::log("Max upload retries (3/3) reached. Sending critical failure alert.", 'ERROR');
+                WP_GDrive_Mailer::send_critical_failure_alert( $error_message );
+                // Clean up now
+                try {
+                    $engine = new WP_GDrive_Backup_Engine();
+                    $engine->step_abort();
+                } catch (Exception $ex) {}
+            }
         } else {
-            // Max retries reached: Reset and send critical alert recommending manual backup
-            delete_option( 'wpgb_backup_retry_count' );
-            WP_GDrive_Logger::log("Max retries (3/3) reached. Sending critical failure alert recommending manual backup.", 'ERROR');
-            WP_GDrive_Mailer::send_critical_failure_alert( $error_message );
+            // Non-upload failure: full cleanup and retry from init
+            try {
+                $engine = new WP_GDrive_Backup_Engine();
+                $engine->step_abort();
+            } catch (Exception $ex) {}
+
+            if ( $retry_count < 3 ) {
+                wp_schedule_single_event( time() + HOUR_IN_SECONDS, 'wpgb_async_cron_step', ['init', 0] );
+                WP_GDrive_Logger::log("Scheduling automatic retry attempt {$retry_count}/3 in 1 hour...", 'WARNING');
+                WP_GDrive_Mailer::send_error_report( $error_message, true, $retry_count );
+            } else {
+                delete_option( 'wpgb_backup_retry_count' );
+                WP_GDrive_Logger::log("Max retries (3/3) reached. Sending critical failure alert recommending manual backup.", 'ERROR');
+                WP_GDrive_Mailer::send_critical_failure_alert( $error_message );
+            }
         }
+    }
+
+    /**
+     * Summarize error for cron log (strip HTML).
+     */
+    private static function summarize_cron_error( $message ) {
+        if ( strpos($message, 'Error 502') !== false || (strpos($message, '502') !== false && strpos($message, 'Server Error') !== false) ) {
+            return 'Google API 502 (Server Error / Bad Gateway)';
+        }
+        if ( strpos($message, 'Error 503') !== false || (strpos($message, '503') !== false && strpos($message, 'Service Unavailable') !== false) ) {
+            return 'Google API 503 (Service Unavailable)';
+        }
+        if ( strpos($message, '<html') !== false || strpos($message, '<style') !== false ) {
+            $clean = strip_tags($message);
+            $clean = preg_replace('/\s+/', ' ', $clean);
+            return mb_strlen(trim($clean)) > 200 ? mb_substr(trim($clean), 0, 200) . '...' : trim($clean);
+        }
+        return $message;
     }
 }

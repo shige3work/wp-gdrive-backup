@@ -269,6 +269,12 @@ class WP_GDrive_Backup_Engine {
         return ['message' => 'Zipファイルの作成を完了しました'];
     }
 
+    /**
+     * Exponential backoff delays for Google API retries (in seconds).
+     * Google recommends waiting at least 30 seconds on 502/503 errors.
+     */
+    private static $retry_backoff = [10, 30, 60, 120, 180];
+
     public function step_upload() {
         $state = json_decode(file_get_contents($this->state_path), true);
         if ( ! $state ) throw new Exception("バックアップ状態が見つかりません。");
@@ -282,7 +288,9 @@ class WP_GDrive_Backup_Engine {
         }
         
         $file_size = filesize($local_file_path);
-        $chunkSizeBytes = 2 * 1024 * 1024; // 2MB chunk
+        // Use 10MB chunks for large files (reduces API call count ~5x)
+        $chunkSizeBytes = 10 * 1024 * 1024; // 10MB chunk
+        $max_retries = count(self::$retry_backoff);
 
         // If resumeUri is not set, initialize upload session
         if ( empty($state['resumeUri']) ) {
@@ -303,26 +311,27 @@ class WP_GDrive_Backup_Engine {
             $media->setFileSize($file_size);
             
             $resumeUri = null;
-            $init_retry = 0;
-            while ( true ) {
+            for ( $attempt = 0; $attempt < $max_retries; $attempt++ ) {
                 try {
                     $resumeUri = $media->getResumeUri();
                     if ( $resumeUri ) {
                         break;
                     }
                 } catch ( \Exception $e ) {
-                    $init_retry++;
-                    if ( $init_retry >= 3 ) {
+                    if ( $attempt >= $max_retries - 1 ) {
                         throw $e;
                     }
-                    WP_GDrive_Logger::log("Upload session init retry ({$init_retry}/3): " . $e->getMessage(), 'WARNING');
-                    sleep(2);
+                    $wait = self::$retry_backoff[$attempt];
+                    WP_GDrive_Logger::log("Upload session init retry (" . ($attempt+1) . "/{$max_retries}): {$wait}秒待機後に再試行... エラー: " . self::summarize_error($e->getMessage()), 'WARNING');
+                    sleep($wait);
                 }
             }
             
             $state['resumeUri'] = $resumeUri;
             $state['uploadOffset'] = 0;
             file_put_contents($this->state_path, wp_json_encode($state));
+            
+            WP_GDrive_Logger::log("Upload session initialized. File size: " . size_format($file_size, 2) . ", Chunk size: " . size_format($chunkSizeBytes, 2));
             
             return [
                 'uploaded' => 0,
@@ -347,26 +356,34 @@ class WP_GDrive_Backup_Engine {
         $start_time = microtime(true);
         while ( ! $status && ! feof($handle) ) {
             $chunk = fread($handle, $chunkSizeBytes);
-            $chunk_retry = 0;
-            while ( true ) {
+            $chunk_success = false;
+            
+            for ( $attempt = 0; $attempt < $max_retries; $attempt++ ) {
                 try {
                     $status = $media->nextChunk($chunk);
+                    $chunk_success = true;
                     break;
                 } catch ( \Exception $e ) {
-                    $chunk_retry++;
-                    if ( $chunk_retry >= 3 ) {
+                    if ( $attempt >= $max_retries - 1 ) {
+                        // All retries exhausted — save current state so we can resume later
                         fclose($handle);
-                        $this->client->setDefer(false);
+                        $client->setDefer(false);
+                        file_put_contents($this->state_path, wp_json_encode($state));
+                        WP_GDrive_Logger::log("Upload chunk failed after {$max_retries} retries. State saved at offset {$state['uploadOffset']} for later resume.", 'ERROR');
                         throw $e;
                     }
-                    WP_GDrive_Logger::log("Upload chunk retry ({$chunk_retry}/3): " . $e->getMessage(), 'WARNING');
-                    sleep(2);
+                    $wait = self::$retry_backoff[$attempt];
+                    WP_GDrive_Logger::log("Upload chunk retry (" . ($attempt+1) . "/{$max_retries}): {$wait}秒待機後に再試行... エラー: " . self::summarize_error($e->getMessage()), 'WARNING');
+                    sleep($wait);
                 }
             }
-            $state['uploadOffset'] = ftell($handle);
             
-            // Break if we exceed 10 seconds
-            if ( (microtime(true) - $start_time) > 10 ) {
+            if ( $chunk_success ) {
+                $state['uploadOffset'] = ftell($handle);
+            }
+            
+            // Break if we exceed 25 seconds (slightly longer window for larger chunks)
+            if ( (microtime(true) - $start_time) > 25 ) {
                 break;
             }
         }
@@ -395,6 +412,25 @@ class WP_GDrive_Backup_Engine {
                 'done' => false
             ];
         }
+    }
+
+    /**
+     * Summarize error messages for logging (strip HTML from Google error pages).
+     */
+    private static function summarize_error( $message ) {
+        if ( strpos($message, 'Error 502') !== false || (strpos($message, '502') !== false && strpos($message, 'Server Error') !== false) ) {
+            return 'Google API 502 (Server Error / Bad Gateway)';
+        }
+        if ( strpos($message, 'Error 503') !== false || (strpos($message, '503') !== false && strpos($message, 'Service Unavailable') !== false) ) {
+            return 'Google API 503 (Service Unavailable)';
+        }
+        if ( strpos($message, '<html') !== false || strpos($message, '<style') !== false ) {
+            $clean = strip_tags($message);
+            $clean = preg_replace('/\s+/', ' ', $clean);
+            $clean = trim($clean);
+            return mb_strlen($clean) > 200 ? mb_substr($clean, 0, 200) . '...' : $clean;
+        }
+        return $message;
     }
 
     public function step_cleanup() {

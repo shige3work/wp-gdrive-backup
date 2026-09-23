@@ -29,19 +29,21 @@ class WP_GDrive_Uploader {
         $this->client->setAccessType('offline');
         
         $token = null;
-        $max_retries = 3;
-        for ( $i = 1; $i <= $max_retries; $i++ ) {
+        $backoff = [10, 30, 60, 120, 180];
+        $max_retries = count($backoff);
+        for ( $i = 0; $i < $max_retries; $i++ ) {
             try {
                 $token = $this->client->refreshToken($refresh_token);
                 if ( ! isset($token['error']) ) {
                     break;
                 }
             } catch ( \Exception $e ) {
-                if ( $i === $max_retries ) {
+                if ( $i >= $max_retries - 1 ) {
                     throw $e;
                 }
-                WP_GDrive_Logger::log("Google Drive 認証トークン更新リトライ中 ({$i}/{$max_retries}): " . $e->getMessage(), 'WARNING');
-                sleep(2);
+                $wait = $backoff[$i];
+                WP_GDrive_Logger::log("Google Drive 認証トークン更新リトライ中 (" . ($i+1) . "/{$max_retries}): {$wait}秒待機... " . $e->getMessage(), 'WARNING');
+                sleep($wait);
             }
         }
         if ( isset($token['error']) ) {
@@ -58,19 +60,21 @@ class WP_GDrive_Uploader {
             'parents' => [ $this->parent_folder_id ]
         ]);
 
-        $max_retries = 3;
-        for ( $i = 1; $i <= $max_retries; $i++ ) {
+        $backoff = [10, 30, 60, 120, 180];
+        $max_retries = count($backoff);
+        for ( $i = 0; $i < $max_retries; $i++ ) {
             try {
                 $folder = $this->service->files->create( $fileMetadata, [
                     'fields' => 'id'
                 ]);
                 return $folder->id;
             } catch ( \Exception $e ) {
-                if ( $i === $max_retries ) {
+                if ( $i >= $max_retries - 1 ) {
                     throw $e;
                 }
-                WP_GDrive_Logger::log("Google Drive フォルダ作成リトライ中 ({$i}/{$max_retries}): " . $e->getMessage(), 'WARNING');
-                sleep(2);
+                $wait = $backoff[$i];
+                WP_GDrive_Logger::log("Google Drive フォルダ作成リトライ中 (" . ($i+1) . "/{$max_retries}): {$wait}秒待機... " . $e->getMessage(), 'WARNING');
+                sleep($wait);
             }
         }
     }
@@ -101,24 +105,25 @@ class WP_GDrive_Uploader {
         );
         $media->setFileSize(filesize($local_file_path));
         
+        $backoff = [10, 30, 60, 120, 180];
+        $max_retries = count($backoff);
         $status = false;
         $handle = fopen($local_file_path, "rb");
         while (!$status && !feof($handle)) {
             $chunk = fread($handle, $chunkSizeBytes);
-            $chunk_retry = 0;
-            while ( true ) {
+            for ( $attempt = 0; $attempt < $max_retries; $attempt++ ) {
                 try {
                     $status = $media->nextChunk($chunk);
                     break;
                 } catch ( \Exception $e ) {
-                    $chunk_retry++;
-                    if ( $chunk_retry >= 3 ) {
+                    if ( $attempt >= $max_retries - 1 ) {
                         fclose($handle);
                         $this->client->setDefer(false);
                         throw $e;
                     }
-                    WP_GDrive_Logger::log("ファイルアップロードチャンクリトライ中 ({$chunk_retry}/3): " . $e->getMessage(), 'WARNING');
-                    sleep(2);
+                    $wait = $backoff[$attempt];
+                    WP_GDrive_Logger::log("ファイルアップロードチャンクリトライ中 (" . ($attempt+1) . "/{$max_retries}): {$wait}秒待機...", 'WARNING');
+                    sleep($wait);
                 }
             }
         }
