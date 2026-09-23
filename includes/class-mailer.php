@@ -47,6 +47,36 @@ class WP_GDrive_Mailer {
         return $sent;
     }
 
+    public static function format_error_message( $error_message ) {
+        if ( empty( $error_message ) ) {
+            return '不明なエラー';
+        }
+
+        // Check for Google 502 / 503 / 500 HTML response
+        if ( strpos( $error_message, 'Error 502' ) !== false || ( strpos( $error_message, '502' ) !== false && strpos( $error_message, 'Server Error' ) !== false ) ) {
+            return "Google Drive サーバーの一時的な通信エラー (HTTP 502 Bad Gateway / Server Error)\n※Google側で一時的な負荷または通信障害が発生しています。プラグインが自動で再試行します。";
+        }
+        if ( strpos( $error_message, 'Error 503' ) !== false || ( strpos( $error_message, '503' ) !== false && strpos( $error_message, 'Service Unavailable' ) !== false ) ) {
+            return "Google Drive サーバーの一時的な過負荷 (HTTP 503 Service Unavailable)\n※Google側で一時的なサービス停止または過負荷が発生しています。プラグインが自動で再試行します。";
+        }
+
+        // If message contains HTML, clean it up
+        if ( strpos( $error_message, '<html' ) !== false || strpos( $error_message, '<body' ) !== false || strpos( $error_message, '<style' ) !== false ) {
+            $clean = preg_replace( '/<style\b[^>]*>(.*?)<\/style>/is', '', $error_message );
+            $clean = preg_replace( '/<script\b[^>]*>(.*?)<\/script>/is', '', $clean );
+            $clean = strip_tags( $clean );
+            $clean = html_entity_decode( $clean, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+            $clean = preg_replace( '/\s+/', ' ', $clean );
+            $clean = trim( $clean );
+            if ( mb_strlen( $clean ) > 300 ) {
+                $clean = mb_substr( $clean, 0, 300 ) . '...';
+            }
+            return ! empty( $clean ) ? $clean : 'サーバー通信エラー (HTMLレスポンス)';
+        }
+
+        return $error_message;
+    }
+
     public static function send_error_report( $error_message, $is_retry = false, $attempt = 1 ) {
         $to = get_option( 'wpgb_report_email', get_option( 'admin_email' ) );
         if ( empty( $to ) ) return false;
@@ -54,11 +84,12 @@ class WP_GDrive_Mailer {
         $site_name = get_bloginfo( 'name' );
         $site_url = site_url();
         $subject = "[{$site_name}] バックアップ失敗通知 (重要)";
+        $formatted_error = self::format_error_message( $error_message );
         
         $message = "サイト「{$site_name}」({$site_url}) の定期バックアップ処理中にエラーが発生しました。\n\n";
         $message .= "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
         $message .= "■ エラー詳細\n";
-        $message .= "・エラー内容: " . $error_message . "\n";
+        $message .= "・エラー内容: " . $formatted_error . "\n";
         $message .= "・発生日時: " . current_time('Y-m-d H:i:s') . "\n";
         if ( $is_retry ) {
             $message .= "・再試行状況: 1時間後に自動再試行を行います (試行 {$attempt}/3)\n";
@@ -79,12 +110,13 @@ class WP_GDrive_Mailer {
         $site_name = get_bloginfo( 'name' );
         $site_url = site_url();
         $subject = "[{$site_name}] 【要対応】バックアップが3回連続で失敗しました（手動切り替え推奨）";
+        $formatted_error = self::format_error_message( $error_message );
         
         $message = "サイト「{$site_name}」({$site_url}) の定期バックアップにおいて、自動再試行（3回）をすべて行いましたが、完了できませんでした。\n\n";
         $message .= "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
         $message .= "■ 状況と原因\n";
-        $message .= "・最後のエラー: " . $error_message . "\n";
-        $message .= "・判定: サイトのデータ容量またはファイル数がサーバーの制限を超えている可能性が高いです。\n";
+        $message .= "・最後のエラー: " . $formatted_error . "\n";
+        $message .= "・判定: サイトのデータ容量超過、またはGoogle Drive側での制限/障害の可能性があります。\n";
         $message .= "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
         $message .= "■ 推奨される対処方法\n";
         $message .= "1. 「WP Storage Cleaner」プラグイン等を使用して、過去のバックアップ残骸やキャッシュを削除し、サイトをスリム化してください。\n";

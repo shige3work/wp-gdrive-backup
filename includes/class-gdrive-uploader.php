@@ -28,7 +28,22 @@ class WP_GDrive_Uploader {
         $this->client->addScope( \Google\Service\Drive::DRIVE_FILE );
         $this->client->setAccessType('offline');
         
-        $token = $this->client->refreshToken($refresh_token);
+        $token = null;
+        $max_retries = 3;
+        for ( $i = 1; $i <= $max_retries; $i++ ) {
+            try {
+                $token = $this->client->refreshToken($refresh_token);
+                if ( ! isset($token['error']) ) {
+                    break;
+                }
+            } catch ( \Exception $e ) {
+                if ( $i === $max_retries ) {
+                    throw $e;
+                }
+                WP_GDrive_Logger::log("Google Drive 認証トークン更新リトライ中 ({$i}/{$max_retries}): " . $e->getMessage(), 'WARNING');
+                sleep(2);
+            }
+        }
         if ( isset($token['error']) ) {
             throw new Exception("Google Driveの認証トークンが無効です。再度連携を行ってください。");
         }
@@ -43,11 +58,21 @@ class WP_GDrive_Uploader {
             'parents' => [ $this->parent_folder_id ]
         ]);
 
-        $folder = $this->service->files->create( $fileMetadata, [
-            'fields' => 'id'
-        ]);
-
-        return $folder->id;
+        $max_retries = 3;
+        for ( $i = 1; $i <= $max_retries; $i++ ) {
+            try {
+                $folder = $this->service->files->create( $fileMetadata, [
+                    'fields' => 'id'
+                ]);
+                return $folder->id;
+            } catch ( \Exception $e ) {
+                if ( $i === $max_retries ) {
+                    throw $e;
+                }
+                WP_GDrive_Logger::log("Google Drive フォルダ作成リトライ中 ({$i}/{$max_retries}): " . $e->getMessage(), 'WARNING');
+                sleep(2);
+            }
+        }
     }
 
     public function upload_file( $local_file_path, $gdrive_file_name, $parent_id ) {
@@ -56,7 +81,6 @@ class WP_GDrive_Uploader {
             'parents' => [ $parent_id ]
         ]);
 
-        $content = file_get_contents( $local_file_path );
         $mime_type = mime_content_type( $local_file_path );
         if ( ! $mime_type ) {
             $mime_type = 'application/octet-stream';
@@ -81,7 +105,22 @@ class WP_GDrive_Uploader {
         $handle = fopen($local_file_path, "rb");
         while (!$status && !feof($handle)) {
             $chunk = fread($handle, $chunkSizeBytes);
-            $status = $media->nextChunk($chunk);
+            $chunk_retry = 0;
+            while ( true ) {
+                try {
+                    $status = $media->nextChunk($chunk);
+                    break;
+                } catch ( \Exception $e ) {
+                    $chunk_retry++;
+                    if ( $chunk_retry >= 3 ) {
+                        fclose($handle);
+                        $this->client->setDefer(false);
+                        throw $e;
+                    }
+                    WP_GDrive_Logger::log("ファイルアップロードチャンクリトライ中 ({$chunk_retry}/3): " . $e->getMessage(), 'WARNING');
+                    sleep(2);
+                }
+            }
         }
         fclose($handle);
         $this->client->setDefer(false);

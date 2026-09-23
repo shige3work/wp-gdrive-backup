@@ -302,7 +302,24 @@ class WP_GDrive_Backup_Engine {
             );
             $media->setFileSize($file_size);
             
-            $resumeUri = $media->getResumeUri();
+            $resumeUri = null;
+            $init_retry = 0;
+            while ( true ) {
+                try {
+                    $resumeUri = $media->getResumeUri();
+                    if ( $resumeUri ) {
+                        break;
+                    }
+                } catch ( \Exception $e ) {
+                    $init_retry++;
+                    if ( $init_retry >= 3 ) {
+                        throw $e;
+                    }
+                    WP_GDrive_Logger::log("Upload session init retry ({$init_retry}/3): " . $e->getMessage(), 'WARNING');
+                    sleep(2);
+                }
+            }
+            
             $state['resumeUri'] = $resumeUri;
             $state['uploadOffset'] = 0;
             file_put_contents($this->state_path, wp_json_encode($state));
@@ -330,7 +347,22 @@ class WP_GDrive_Backup_Engine {
         $start_time = microtime(true);
         while ( ! $status && ! feof($handle) ) {
             $chunk = fread($handle, $chunkSizeBytes);
-            $status = $media->nextChunk($chunk);
+            $chunk_retry = 0;
+            while ( true ) {
+                try {
+                    $status = $media->nextChunk($chunk);
+                    break;
+                } catch ( \Exception $e ) {
+                    $chunk_retry++;
+                    if ( $chunk_retry >= 3 ) {
+                        fclose($handle);
+                        $this->client->setDefer(false);
+                        throw $e;
+                    }
+                    WP_GDrive_Logger::log("Upload chunk retry ({$chunk_retry}/3): " . $e->getMessage(), 'WARNING');
+                    sleep(2);
+                }
+            }
             $state['uploadOffset'] = ftell($handle);
             
             // Break if we exceed 10 seconds
